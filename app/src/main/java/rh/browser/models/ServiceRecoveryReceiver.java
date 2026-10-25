@@ -12,7 +12,7 @@ import android.util.Log;
 public class ServiceRecoveryReceiver extends BroadcastReceiver {
     private static final String TAG = "RhBrowserRecovery";
     private static final int REQUEST_CODE = 9077;
-    private static final long NORMAL_RETRY_MS = 15L * 60L * 1000L;
+    private static final long NORMAL_RETRY_MS = 10L * 60L * 1000L;
     private static final long FAILURE_RETRY_MS = 60L * 1000L;
 
     public void onReceive(Context context, Intent intent) {

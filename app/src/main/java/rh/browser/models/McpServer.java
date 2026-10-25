@@ -242,12 +242,12 @@ public class McpServer {
             caps.put("tools", tools);
             JSONObject info = new JSONObject();
             info.put("name", "Rh Browser for Models");
-            info.put("version", "1.0.0");
+            info.put("version", "1.5.0-models-browser.beta");
             JSONObject r = new JSONObject();
             r.put("protocolVersion", version);
             r.put("capabilities", caps);
             r.put("serverInfo", info);
-            r.put("instructions", "Browser Android mandiri melalui Rh Browser for Models. Tool tersedia untuk mengendalikan browser WebView.");
+            r.put("instructions", "Rh Browser for Models menyediakan browser WebView dan sistem workflow. Workflow .flow dan .bshflow boleh berjalan tanpa endpoint, memakai server bersama port 8084, atau memakai satu port eksklusif per workflow (maksimal lima port eksklusif aktif). Workflow dapat meminta input interaktif; gunakan workflow.start agar eksekusi tidak menahan permintaan MCP ketika menunggu input, lalu workflow.get_pending_input untuk melihat prompt, workflow.submit_input untuk mengirim jawaban hanya jika permissions.aiWriteInput aktif pada workflow tersebut, dan workflow.get_execution untuk memantau status serta hasil akhir. workflow.run tetap sinkron. Log persisten tersedia melalui workflow.get_info_logs, workflow.get_error_logs, atau workflow.get_logs.");
             response.put("result", r);
             return response;
         }

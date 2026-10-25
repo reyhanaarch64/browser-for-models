@@ -1,6 +1,7 @@
 package rh.browser.models;
 
 import android.content.Context;
+import android.app.Activity;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -152,4 +153,68 @@ public final class UiKit {
     public static LinearLayout.LayoutParams lp(Context c, int width, int height) {
         return new LinearLayout.LayoutParams(width < 0 ? width : dp(c, width), height < 0 ? height : dp(c, height));
     }
+    public static void applyImmersive(Activity activity) {
+        activity.getWindow().setStatusBarColor(BG);
+        activity.getWindow().setNavigationBarColor(BG);
+        int flags = View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+        activity.getWindow().getDecorView().setSystemUiVisibility(flags);
+    }
+
+    public static void addBottomNavigation(final Activity activity, LinearLayout root, String activeTab) {
+        LinearLayout bar = new LinearLayout(activity);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER);
+        bar.setPadding(dp(activity, 4), dp(activity, 4), dp(activity, 4), dp(activity, 4));
+        bar.setBackground(shape(SURFACE, 19, BORDER, 1, activity));
+        LinearLayout.LayoutParams barLp = lp(activity, -1, 56);
+        barLp.topMargin = dp(activity, 5);
+        root.addView(bar, barLp);
+        addNavItem(activity, bar, 0xf0ac, "Browser", "browser".equals(activeTab), new View.OnClickListener() {
+            public void onClick(View v) { openTab(activity, MainActivity.class); }
+        });
+        addNavItem(activity, bar, 0xf1de, "Tools", "tools".equals(activeTab), new View.OnClickListener() {
+            public void onClick(View v) { openTab(activity, ToolSettingsActivity.class); }
+        });
+        addNavItem(activity, bar, 0xf019, "Downloads", "downloads".equals(activeTab), new View.OnClickListener() {
+            public void onClick(View v) { openTab(activity, DownloadsActivity.class); }
+        });
+        addNavItem(activity, bar, 0xf0ae, "Workflow", "workflow".equals(activeTab), new View.OnClickListener() {
+            public void onClick(View v) { openTab(activity, WorkflowActivity.class); }
+        });
+        addNavItem(activity, bar, 0xf013, "Service", "service".equals(activeTab), new View.OnClickListener() {
+            public void onClick(View v) { openTab(activity, ServiceSettingsActivity.class); }
+        });
+    }
+
+    public static void openTab(Activity current, Class target) {
+        if (current == null || target == null || current.getClass() == target) return;
+        android.content.Intent intent = new android.content.Intent(current, target);
+        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                | android.content.Intent.FLAG_ACTIVITY_NO_ANIMATION);
+        current.startActivity(intent);
+        current.overridePendingTransition(0, 0);
+    }
+
+    private static void addNavItem(Context context, LinearLayout parent, int iconCode, String label, boolean active, View.OnClickListener listener) {
+        LinearLayout item = new LinearLayout(context);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setGravity(Gravity.CENTER);
+        if (active) item.setBackground(shape(0xFF14385C, 14, 0, 0, context));
+        TextView icon = icon(context, iconCode, 16, active ? BLUE : MUTED);
+        item.addView(icon, lp(context, -1, 21));
+        TextView text = label(context, label, 10, active ? TEXT : MUTED, active);
+        text.setGravity(Gravity.CENTER);
+        item.addView(text, lp(context, -1, 17));
+        LinearLayout.LayoutParams itemLp = new LinearLayout.LayoutParams(0, -1, 1);
+        itemLp.leftMargin = dp(context, 2);
+        itemLp.rightMargin = dp(context, 2);
+        parent.addView(item, itemLp);
+        item.setOnClickListener(listener);
+    }
+
 }

@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="rh.browser.models">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="rh.browser.models" android:versionCode="151" android:versionName="1.5.0-models-browser.beta">
     <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="30" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -31,6 +33,9 @@
         <activity android:name="rh.browser.models.DownloadsActivity" android:label="Download Manager" android:exported="false" />
         <activity android:name="rh.browser.models.ToolSettingsActivity" android:label="Tool Browser" android:exported="false" />
         <activity android:name="rh.browser.models.ServiceSettingsActivity" android:label="Service &amp; Tunnel" android:exported="false" />
+        <activity android:name="rh.browser.models.WorkflowActivity" android:label="Workflow" android:exported="false" />
+        <activity android:name="rh.browser.models.WorkflowEditorActivity" android:label="Editor Workflow" android:exported="false" />
+        <activity android:name="rh.browser.models.WorkflowLogActivity" android:label="Workflow Logs" android:exported="false" />
 
         <service
             android:name="rh.browser.models.BrowserService"
@@ -46,5 +51,6 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+        <provider android:name="rh.browser.models.McpFileProvider" android:authorities="rh.browser.models.files" android:exported="false" android:grantUriPermissions="true" />
     </application>
 </manifest>

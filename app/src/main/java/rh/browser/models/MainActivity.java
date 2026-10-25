@@ -57,11 +57,7 @@ public class MainActivity extends Activity {
     };
 
     private void applyImmersiveMode() {
-        int flags = View.SYSTEM_UI_FLAG_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
-        getWindow().getDecorView().setSystemUiVisibility(flags);
+        UiKit.applyImmersive(this);
     }
 
     public void onWindowFocusChanged(boolean hasFocus) {
@@ -148,8 +144,8 @@ public class MainActivity extends Activity {
         addBrowserControl(controls, 0xf060, "Kembali", new View.OnClickListener() { public void onClick(View v) { if (webView != null && webView.canGoBack()) webView.goBack(); } });
         addBrowserControl(controls, 0xf061, "Maju", new View.OnClickListener() { public void onClick(View v) { if (webView != null && webView.canGoForward()) webView.goForward(); } });
         addBrowserControl(controls, 0xf2f1, "Muat ulang", new View.OnClickListener() { public void onClick(View v) { if (webView != null) webView.reload(); } });
-        addBrowserControl(controls, 0xf019, "Download", new View.OnClickListener() { public void onClick(View v) { startActivity(new Intent(MainActivity.this, DownloadsActivity.class)); } });
-        addBrowserControl(controls, 0xf1de, "Tool AI", new View.OnClickListener() { public void onClick(View v) { startActivity(new Intent(MainActivity.this, ToolSettingsActivity.class)); } });
+        addBrowserControl(controls, 0xf019, "Download", new View.OnClickListener() { public void onClick(View v) { UiKit.openTab(MainActivity.this, DownloadsActivity.class); } });
+        addBrowserControl(controls, 0xf1de, "Tool AI", new View.OnClickListener() { public void onClick(View v) { UiKit.openTab(MainActivity.this, ToolSettingsActivity.class); } });
 
         webContainer = new FrameLayout(this);
         webContainer.setBackground(UiKit.shape(0xFFFFFFFF, 16, UiKit.BORDER, 1, this));
@@ -159,15 +155,7 @@ public class MainActivity extends Activity {
         webLp.bottomMargin = UiKit.dp(this, 7);
         root.addView(webContainer, webLp);
 
-        LinearLayout bottom = UiKit.horizontal(this);
-        bottom.setGravity(Gravity.CENTER);
-        bottom.setPadding(UiKit.dp(this, 4), UiKit.dp(this, 4), UiKit.dp(this, 4), UiKit.dp(this, 4));
-        bottom.setBackground(UiKit.shape(UiKit.SURFACE, 19, UiKit.BORDER, 1, this));
-        root.addView(bottom, UiKit.lp(this, -1, 56));
-        addNav(bottom, 0xf0ac, "Browser", new View.OnClickListener() { public void onClick(View v) { focusAddress(false); } }, true);
-        addNav(bottom, 0xf1de, "Tools", new View.OnClickListener() { public void onClick(View v) { startActivity(new Intent(MainActivity.this, ToolSettingsActivity.class)); } }, false);
-        addNav(bottom, 0xf019, "Downloads", new View.OnClickListener() { public void onClick(View v) { startActivity(new Intent(MainActivity.this, DownloadsActivity.class)); } }, false);
-        addNav(bottom, 0xf013, "Service", new View.OnClickListener() { public void onClick(View v) { startActivity(new Intent(MainActivity.this, ServiceSettingsActivity.class)); } }, false);
+        UiKit.addBottomNavigation(this, root, "browser");
     }
 
     private void addBrowserControl(LinearLayout parent, int iconCode, String label, View.OnClickListener listener) {
@@ -218,21 +206,134 @@ public class MainActivity extends Activity {
     }
 
     private void navigateAddress() {
-        String url = address.getText().toString().trim();
-        if (url.length() == 0) return;
-        if (!url.matches("(?i)^https?://.*")) url = "https://" + url;
-        try {
-            android.net.Uri uri = android.net.Uri.parse(url);
-            if (uri.getHost() == null) throw new IllegalArgumentException("URL tidak valid");
-            if (webView == null) attachBrowser();
-            if (webView != null) {
-                address.setText(url);
-                webView.loadUrl(url);
-                focusAddress(false);
-            }
-        } catch (Exception e) {
-            Toast.makeText(this, "URL tidak valid: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+        String input = address.getText().toString().trim();
+        if (input.length() == 0) return;
+
+        // Any whitespace remaining after trim() is inside the query, so search
+        // even when the text starts with an HTTP/HTTPS scheme.
+        if (containsInternalWhitespace(input)) {
+            openAddressTarget(buildGoogleSearchUrl(input));
+            return;
         }
+
+        String url = resolveAddress(input);
+        if (url == null) {
+            openAddressTarget(buildGoogleSearchUrl(input));
+        } else {
+            openAddressTarget(url);
+        }
+    }
+
+    private boolean containsInternalWhitespace(String value) {
+        int i;
+        for (i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (Character.isWhitespace(c) || Character.isSpaceChar(c)) return true;
+        }
+        return false;
+    }
+
+    private String buildGoogleSearchUrl(String query) {
+        return "https://www.google.com/search?q=" + android.net.Uri.encode(query);
+    }
+
+    private void openAddressTarget(String url) {
+        if (webView == null) attachBrowser();
+        if (webView != null) {
+            address.setText(url);
+            webView.loadUrl(url);
+            focusAddress(false);
+        }
+    }
+
+    private String resolveAddress(String input) {
+        boolean hasHttpScheme = input.matches("(?i)^https?://.*");
+        try {
+            if (hasHttpScheme) {
+                java.net.URI parsed = new java.net.URI(input);
+                String scheme = parsed.getScheme();
+                String host = parsed.getHost();
+                if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) return null;
+                if (!isValidHost(host, true) || !isValidPort(parsed.getPort())) return null;
+                return input;
+            }
+
+            // Test the input as a possible host, domain, IP address, and optional port/path.
+            java.net.URI parsed = new java.net.URI("https://" + input);
+            String host = parsed.getHost();
+            if (!isValidHost(host, false) || !isValidPort(parsed.getPort())) return null;
+
+            // Plain local hosts and IP addresses commonly serve HTTP without TLS.
+            if (host.equalsIgnoreCase("localhost") || isIpv4Address(host) || isIpv6Address(host)) {
+                return "http://" + input;
+            }
+            return "https://" + input;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private boolean isValidPort(int port) {
+        return port == -1 || (port > 0 && port <= 65535);
+    }
+
+    private boolean isValidHost(String host, boolean allowSingleLabel) {
+        if (host == null || host.length() == 0) return false;
+
+        String value = host;
+        if (value.startsWith("[") && value.endsWith("]")) {
+            value = value.substring(1, value.length() - 1);
+        }
+        if (isIpv6Address(value)) return true;
+        if (isIpv4Address(value)) return true;
+        if (value.matches("[0-9.]+")) return false;
+        if (value.equalsIgnoreCase("localhost")) return true;
+        if (value.length() > 253) return false;
+
+        // A bare single word such as "mobil" is a search, not a host.
+        if (!allowSingleLabel && value.indexOf('.') < 0) return false;
+        if (value.endsWith(".")) value = value.substring(0, value.length() - 1);
+        if (value.length() == 0) return false;
+
+        String[] labels = value.split("\\.", -1);
+        int i;
+        for (i = 0; i < labels.length; i++) {
+            String label = labels[i];
+            if (label.length() == 0 || label.length() > 63) return false;
+            if (label.charAt(0) == '-' || label.charAt(label.length() - 1) == '-') return false;
+            int j;
+            for (j = 0; j < label.length(); j++) {
+                char c = label.charAt(j);
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-')) return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isIpv4Address(String host) {
+        if (host == null) return false;
+        String[] parts = host.split("\\.", -1);
+        if (parts.length != 4) return false;
+        int i;
+        for (i = 0; i < parts.length; i++) {
+            String part = parts[i];
+            if (part.length() == 0 || part.length() > 3) return false;
+            int j;
+            for (j = 0; j < part.length(); j++) {
+                if (part.charAt(j) < '0' || part.charAt(j) > '9') return false;
+            }
+            try {
+                int number = Integer.parseInt(part);
+                if (number < 0 || number > 255) return false;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isIpv6Address(String host) {
+        return host != null && host.indexOf(':') >= 0 && host.matches("(?i)^[0-9a-f:.]+$");
     }
 
     private void focusAddress(boolean focus) {
@@ -266,7 +367,7 @@ public class MainActivity extends Activity {
 
     protected void onResume() {
         super.onResume();
-        if (bound) attachBrowser();
+        if (bound && (webView == null || webContainer == null || webView.getParent() != webContainer)) attachBrowser();
         handler.removeCallbacks(poll);
         handler.post(poll);
     }

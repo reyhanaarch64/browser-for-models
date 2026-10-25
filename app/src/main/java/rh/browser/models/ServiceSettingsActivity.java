@@ -37,11 +37,7 @@ public class ServiceSettingsActivity extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         setTitle("Service & Tunnel");
-        // These are regular content screens: do not inherit Browser's immersive flags.
-        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
-        getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
-        getWindow().setStatusBarColor(UiKit.BG);
-        getWindow().setNavigationBarColor(UiKit.BG);
+        UiKit.applyImmersive(this);
         buildUi();
         Intent i = new Intent(this, BrowserService.class);
         try {
@@ -56,7 +52,7 @@ public class ServiceSettingsActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(UiKit.BG);
-        root.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 12), UiKit.dp(this, 16), UiKit.dp(this, 8));
+        root.setPadding(UiKit.dp(this, 10), UiKit.dp(this, 6), UiKit.dp(this, 10), UiKit.dp(this, 5));
         setContentView(root);
         LinearLayout top = UiKit.horizontal(this);
         TextView back = UiKit.iconButton(this, 0xf060, "Kembali");
@@ -69,7 +65,8 @@ public class ServiceSettingsActivity extends Activity {
         top.addView(heading, hLp);
         heading.addView(UiKit.label(this, "Service & Tunnel", 20, UiKit.TEXT, true));
         heading.addView(UiKit.label(this, "Pengaturan server background", 12, UiKit.MUTED, false));
-        root.addView(top, UiKit.lp(this, -1, 52));
+        top.setVisibility(View.GONE);
+        root.addView(top, UiKit.lp(this, -1, 0));
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(false);
@@ -80,6 +77,7 @@ public class ServiceSettingsActivity extends Activity {
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
+        UiKit.addBottomNavigation(this, root, "service");
 
         LinearLayout serverCard = UiKit.card(this, 15);
         content.addView(serverCard, UiKit.lp(this, -1, -2));
@@ -167,7 +165,22 @@ public class ServiceSettingsActivity extends Activity {
         LinearLayout.LayoutParams taLp = UiKit.lp(this, -1, 43);
         taLp.topMargin = UiKit.dp(this, 8);
         tunnelCard.addView(tunnelAction, taLp);
-        tunnelAction.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { if (service != null) { requestStartedService(); service.stopTunnel(); service.startTunnel(); refresh(); } } });
+        tunnelAction.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                if (service == null) return;
+                if (!service.isTunnelRequested()) {
+                    requestStartedService();
+                    service.startTunnel();
+                } else if (service.getTunnelError().length() > 0 && !service.isTunnelRunning() && service.getPublicUrl().length() == 0) {
+                    // Kalau percobaan sebelumnya gagal, ketukan berikutnya mencoba lagi.
+                    service.stopTunnel();
+                    service.startTunnel();
+                } else {
+                    service.stopTunnel();
+                }
+                refresh();
+            }
+        });
 
         LinearLayout vivoCard = UiKit.card(this, 15);
         LinearLayout.LayoutParams vivoLp = UiKit.lp(this, -1, -2);
@@ -228,11 +241,13 @@ public class ServiceSettingsActivity extends Activity {
         if (tunnelState != null) {
             String pub = service == null ? "" : service.getPublicUrl();
             String err = service == null ? "" : service.getTunnelError();
-            tunnelState.setText(pub.length() > 0 ? "Terhubung" : (err.length() > 0 ? err : "Belum terhubung"));
+            boolean requested = service != null && service.isTunnelRequested();
+            tunnelState.setText(pub.length() > 0 ? "Terhubung" : (err.length() > 0 ? err : (requested ? "Menghubungkan..." : "Tidak aktif · nyalakan manual")));
             tunnelState.setTextColor(pub.length() > 0 ? UiKit.GREEN : UiKit.MUTED);
-            publicUrl.setText(pub.length() > 0 ? pub : "URL publik akan muncul setelah tunnel terhubung.");
-            tunnelAction.setContentDescription(pub.length() > 0 ? "Restart tunnel" : "Mulai tunnel");
-            UiKit.setActionText(tunnelAction, pub.length() > 0 ? "Restart tunnel" : "Mulai tunnel");
+            publicUrl.setText(pub.length() > 0 ? pub : "URL publik akan muncul setelah tunnel dinyalakan manual.");
+            String actionText = !requested ? "Mulai tunnel" : ((err.length() > 0 && service != null && !service.isTunnelRunning() && pub.length() == 0) ? "Coba lagi" : "Hentikan tunnel");
+            tunnelAction.setContentDescription(actionText);
+            UiKit.setActionText(tunnelAction, actionText);
         }
         if (batteryState != null && Build.VERSION.SDK_INT >= 23) {
             PowerManager pm = (PowerManager)getSystemService(POWER_SERVICE);

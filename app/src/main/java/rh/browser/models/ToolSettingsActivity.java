@@ -12,19 +12,18 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.util.List;
+import java.util.ArrayList;
 
 public class ToolSettingsActivity extends Activity {
     private LinearLayout list;
     private TextView count;
+    private final ArrayList<Switch> toggleViews = new ArrayList<Switch>();
+    private boolean applyingBulkChange;
 
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         setTitle("Tool Browser");
-        // These are regular content screens: do not inherit Browser's immersive flags.
-        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
-        getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
-        getWindow().setStatusBarColor(UiKit.BG);
-        getWindow().setNavigationBarColor(UiKit.BG);
+        UiKit.applyImmersive(this);
         buildUi();
         renderTools();
     }
@@ -33,7 +32,7 @@ public class ToolSettingsActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(UiKit.BG);
-        root.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 12), UiKit.dp(this, 16), UiKit.dp(this, 8));
+        root.setPadding(UiKit.dp(this, 10), UiKit.dp(this, 6), UiKit.dp(this, 10), UiKit.dp(this, 5));
         setContentView(root);
 
         LinearLayout top = UiKit.horizontal(this);
@@ -47,7 +46,8 @@ public class ToolSettingsActivity extends Activity {
         top.addView(titleCol, titleLp);
         titleCol.addView(UiKit.label(this, "Tool Browser", 21, UiKit.TEXT, true));
         titleCol.addView(UiKit.label(this, "Atur akses tool yang terlihat oleh AI", 12, UiKit.MUTED, false));
-        root.addView(top, UiKit.lp(this, -1, 54));
+        top.setVisibility(View.GONE);
+        root.addView(top, UiKit.lp(this, -1, 0));
 
         LinearLayout summary = UiKit.card(this, 14);
         summary.setOrientation(LinearLayout.VERTICAL);
@@ -73,12 +73,30 @@ public class ToolSettingsActivity extends Activity {
         summary.addView(buttons, buttonLp);
         LinearLayout enable = UiKit.action(this, 0xf205, "Semua aktif", true);
         buttons.addView(enable, new LinearLayout.LayoutParams(0, -1, 1));
-        enable.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { ToolSettings.enableAll(ToolSettingsActivity.this); renderTools(); Toast.makeText(ToolSettingsActivity.this, "Semua tool diaktifkan", Toast.LENGTH_SHORT).show(); } });
+        enable.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                ToolSettings.enableAll(ToolSettingsActivity.this);
+                applyingBulkChange = true;
+                for (int i = 0; i < toggleViews.size(); i++) toggleViews.get(i).setChecked(true);
+                applyingBulkChange = false;
+                updateCount();
+                Toast.makeText(ToolSettingsActivity.this, "Semua tool diaktifkan", Toast.LENGTH_SHORT).show();
+            }
+        });
         LinearLayout disable = UiKit.action(this, 0xf204, "Semua mati", false);
         LinearLayout.LayoutParams disableLp = new LinearLayout.LayoutParams(0, -1, 1);
         disableLp.leftMargin = UiKit.dp(this, 8);
         buttons.addView(disable, disableLp);
-        disable.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { ToolSettings.disableAll(ToolSettingsActivity.this); renderTools(); Toast.makeText(ToolSettingsActivity.this, "Semua tool dinonaktifkan", Toast.LENGTH_SHORT).show(); } });
+        disable.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                ToolSettings.disableAll(ToolSettingsActivity.this);
+                applyingBulkChange = true;
+                for (int i = 0; i < toggleViews.size(); i++) toggleViews.get(i).setChecked(false);
+                applyingBulkChange = false;
+                updateCount();
+                Toast.makeText(ToolSettingsActivity.this, "Semua tool dinonaktifkan", Toast.LENGTH_SHORT).show();
+            }
+        });
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(false);
@@ -89,11 +107,13 @@ public class ToolSettingsActivity extends Activity {
         list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(list, new ScrollView.LayoutParams(-1, -2));
+        UiKit.addBottomNavigation(this, root, "tools");
     }
 
     private void renderTools() {
         if (list == null) return;
         list.removeAllViews();
+        toggleViews.clear();
         List<ToolDef> tools = ToolRegistry.all();
         int enabled = 0;
         for (int i = 0; i < tools.size(); i++) if (ToolSettings.isEnabled(this, tools.get(i))) enabled++;
@@ -134,8 +154,10 @@ public class ToolSettingsActivity extends Activity {
             toggle.setThumbTintList(new ColorStateList(new int[][] { new int[] { android.R.attr.state_checked }, new int[] {} }, new int[] { UiKit.BLUE, 0xFF71839A }));
             toggle.setTrackTintList(new ColorStateList(new int[][] { new int[] { android.R.attr.state_checked }, new int[] {} }, new int[] { 0xFF326CAF, 0xFF334358 }));
             row.addView(toggle, UiKit.lp(this, 52, 44));
+            toggleViews.add(toggle);
             toggle.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
                 public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                    if (applyingBulkChange) return;
                     ToolSettings.setTool(ToolSettingsActivity.this, tool, isChecked);
                     updateCount();
                 }

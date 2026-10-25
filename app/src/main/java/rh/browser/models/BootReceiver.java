@@ -13,7 +13,7 @@ public class BootReceiver extends BroadcastReceiver {
             Intent i = new Intent(context, BrowserService.class);
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i);
             else context.startService(i);
-            ServiceRecoveryReceiver.schedule(context, 15L * 60L * 1000L);
+            ServiceRecoveryReceiver.schedule(context, 10L * 60L * 1000L);
         } catch (Throwable t) {
             Log.e("RhBrowserBoot", "Gagal memulai service saat boot/update", t);
             ServiceRecoveryReceiver.schedule(context, 60L * 1000L);

@@ -1,80 +1,295 @@
 # Rh Browser for Models
 
-<div align="center">
-  <p><strong>Language / Bahasa</strong></p>
-  <p>
-    <a href="#bahasa-indonesia">Indonesia</a> ·
-    <a href="#english-us">English (US)</a>
-  </p>
-</div>
+<p align="center"><a href="#english">English</a> | <a href="#bahasa-indonesia">Bahasa Indonesia</a></p>
+
+## English
+
+An Android app that gives AI models access to a real mobile browser through the Model Context Protocol (MCP). It runs a local `WebView` browser that an AI client controls through an MCP endpoint on localhost, or through a public tunnel, so a model can open pages, read the DOM, click elements, fill forms, take screenshots and reach page resources without a desktop browser. It also includes a Workflow subsystem for saving automation scripts on the device and running them on demand.
+
+**Current version:** `1.5.0-models-browser.beta` (version code `151`), package `rh.browser.models`. Requires Android 6.0 (API 23) or newer and targets API 30. The code follows a Java 7 style, and BeanShell is loaded through reflection.
+
+### Features
+
+- A `WebView` browser that stays alive in a foreground service, even when the app is not visible
+- An MCP server (JSON-RPC over HTTP) with 48 tools: 27 browser tools and 21 workflow tools
+- A tool registry that can be switched on or off per tool or per category, with read/write access modes
+- Optional bearer-token authentication for the MCP endpoint
+- A Cloudflare quick tunnel that the user starts manually
+- A Workflow subsystem: declarative `.flow` scripts and BeanShell `.bshflow` scripts, a native editor, execution logs, interactive input and optional local HTTP endpoints
+- A built-in download manager screen
+- A recovery watchdog and an in-process health check for the listeners
+
+### Architecture
+
+The project is a single Android module. The Java sources are in `app/src/main/java/rh/browser/models/`.
+
+```text
+browser-for-models/
+├── app/
+│   ├── libs/bsh-2.0b4.jar                  (BeanShell)
+│   └── src/main/
+│       ├── AndroidManifest.xml
+│       ├── assets/fonts/
+│       ├── java/rh/browser/models/
+│       ├── jniLibs/arm64-v8a/libcloudflared.so
+│       └── res/
+├── build.gradle
+├── settings.gradle
+├── .gitignore
+├── LICENSE
+└── README.md
+```
+
+#### Main source files
+
+- `MainActivity`: the browser screen, with an address bar, back/forward/reload, open and copy URL actions, and the browser control panel. It shows the WebView that belongs to the service.
+- `BrowserService`: the foreground service that hosts `BrowserManager`, `McpServer`, the workflow HTTP listeners and the optional tunnel. It also runs the health check and recovery logic.
+- `BrowserManager`: performs the real WebView operations: opening pages, inspecting and searching the DOM, clicks and coordinate clicks, text and file input, option selection, key presses, scrolling, page source, screenshots, page resources, network observation and the console.
+- `McpServer`: the HTTP JSON-RPC server. It handles `initialize`, `ping`, `tools/list`, `resources/list`, `prompts/list` and `tools/call`, and checks the bearer token when authentication is enabled.
+- `ToolRegistry`, `ToolDef`, `ToolSettings`, `ToolSettingsActivity`: tool definitions with input schema, category, access mode and default state, plus the settings screen **Tool Browser** that stores `auth_enabled`, `mcp_token`, `server_enabled`, per-tool toggles and category read/write states.
+- `ServiceSettingsActivity`: the **Service & Tunnel** screen for the server status, the tunnel, the local endpoint and token, authentication, battery optimization and the Vivo autostart settings.
+- `BrowserDownloads`, `DownloadsActivity`: the download manager screen.
+- `McpFileProvider`: a read-only content provider that serves files staged in the app cache (`mcp_input_files`).
+- `ServiceRecoveryReceiver`, `BootReceiver`: a best-effort watchdog and the boot/package-replaced receiver.
+- `UiKit`: the shared native UI helpers.
+- `WorkflowManager`: native storage, metadata, the log database, ZIP import/export and the MCP management API.
+- `WorkflowExecutor`: runs declarative `.flow` jobs and BeanShell `.bshflow` jobs, each in its own WebView.
+- `WorkflowBrowser`: the independent WebView used by workflows.
+- `WorkflowRuntimeApi`: the object surface that BeanShell workflow scripts can use.
+- `WorkflowHttpServer`: the optional local HTTP endpoints of workflows.
+- `WorkflowActivity`, `WorkflowEditorActivity`, `WorkflowLogActivity`, `WorkflowExecutionException`: the workflow list, the native editor, the log screen and the execution error type.
+
+### How it works
+
+1. The user opens the app, and `MainActivity` connects to `BrowserService`.
+2. `BrowserService` starts `BrowserManager` and `McpServer` (port `9010`).
+3. An AI client connects to `http://127.0.0.1:9010/mcp`, or to a public tunnel if the user started one.
+4. The client calls `tools/list`, chooses a tool and calls it through JSON-RPC.
+5. `BrowserManager` (or the workflow runtime) operates a real WebView.
+6. The result returns as MCP content: text, an image or a blob/resource.
+
+The health endpoint is `http://127.0.0.1:9010/health`.
+
+### MCP tools
+
+Every tool has an input schema, a category (`browser` or `workflow`), an access mode (read or write) and a default enabled state. Tools can be switched off one by one in **Tool Browser**.
+
+**Browser tools (27)**
+
+- Navigation and page profile: `browser.open`, `browser.back`, `browser.wait_for`, `browser.set_mode`, `browser.set_viewport`, `browser.set_user_agent`
+- Inspection and reading: `browser.inspect`, `browser.search_element`, `browser.get_element`, `browser.source`, `browser.screenshot`, `browser.map_coordinates`, `browser.item.list`, `browser.get.item`, `browser.network`, `browser.debug.console`
+- Interaction: `browser.click`, `browser.click_at`, `browser.scroll`, `browser.press_key`, `browser.input`, `browser.input_text`, `browser.input_files`, `browser.input_option`
+- Site data: `browser.clear_cookies`, `browser.clear_localstorage`, `browser.clear_sessionstorage`
+
+A few notes on these tools:
+
+- `browser.inspect` returns interactive elements with `eN` references. A reference is only valid for the latest inspection result.
+- `browser.wait_for` supports the conditions `element`, `text`, `url`, `load`, `hidden`, `network_idle` and `custom`.
+- `browser.map_coordinates` returns a viewport screenshot with a labeled grid, so visual elements can be mapped to `browser.click_at`.
+- `browser.input_files` puts files into an `input type=file` through the native WebView file chooser. The source can be a path, a URL, base64 or inline content.
+- `browser.network` lists observed requests. Without arguments it returns all of them, and the optional filters are combined with AND.
+- `browser.item.list` and `browser.get.item` list resources referenced by the page and fetch one again by item ID.
+
+**Workflow tools (21)**
+
+- Management: `workflow.list`, `workflow.create`, `workflow.update`, `workflow.delete`
+- Files: `workflow.list_files`, `workflow.read_file`, `workflow.write_file`, `workflow.create_folder`, `workflow.delete_file`
+- Lifecycle: `workflow.validate`, `workflow.activate`, `workflow.deactivate`
+- Execution: `workflow.run`, `workflow.start`, `workflow.get_execution`
+- Interactive input: `workflow.get_pending_input`, `workflow.submit_input`
+- Logs: `workflow.get_logs`, `workflow.get_info_logs`, `workflow.get_error_logs`, `workflow.get_errors`
+
+### Workflow subsystem
+
+A workflow is a saved automation that runs in its own WebView. It can be created and edited in the app or through the MCP workflow tools.
+
+#### Storage layout
+
+Workflows are stored privately at `files/workflows/<id>/`. `metadata.json` is generated and updated by the editor or by the structured MCP metadata tools; authors normally edit only the script files.
+
+```text
+search-tes/
+├── metadata.json
+├── script/
+│   ├── main.flow
+│   └── helpers.bshflow
+└── assets/
+    ├── config.json
+    ├── template.html
+    └── images/
+        └── logo.png
+```
+
+The app creates `script/` and `assets/`. The editor can create and open files and folders, edit text, delete files, import binary assets, choose an entry point, and export or import a whole workflow as a ZIP. The installer expects `workflow/metadata.json` and the related `workflow/script/` and `workflow/assets/` entries in a ZIP.
+
+#### Metadata and lifecycle
+
+Metadata fields include `id`, `name`, `description`, `format`, `entry`, `enabled`, `endpoint` and `permissions`. The editor handles metadata as form fields, not as a raw JSON editor. A new or imported workflow stays disabled until it is activated explicitly.
+
+`enabled` is the desired activation state. An endpoint is a separate, optional transport: a workflow can be installed and run without opening any HTTP port.
+
+#### Declarative `.flow`
+
+A `.flow` file is UTF-8 JSON with a `steps` array:
+
+```json
+{
+  "steps": [
+    { "action": "navigate", "url": "https://example.com" },
+    { "action": "extract", "selector": "h1", "as": "title" }
+  ],
+  "output": { "title": "${vars.title}" }
+}
+```
+
+Supported actions:
+
+- `navigate` / `open`
+- `waitFor` / `wait_for` / `wait`
+- `input` / `prompt` / `input_prompt` (interactive prompt) and `input` / `fill` (DOM input)
+- `click`
+- `extract`, `extractAll` / `extract_all`
+- `set`, `delay` / `sleep`, `scroll`, `assert`
+- `respond` / `return`
+- `log` / `printLog`
+- `readAsset` / `read_asset` and `writeAsset` / `write_asset` for text or base64 asset files (`readAsset` can use `parseJson: true` to parse a JSON asset into a value)
+
+For a DOM input step, set `selector`. An interactive prompt looks like this:
+
+```json
+{
+  "action": "input",
+  "name": "query",
+  "prompt": "Enter the search query",
+  "inputType": "text",
+  "required": true,
+  "timeout": 600000
+}
+```
+
+The interactive step checks `input.query` first. If the caller already supplied it, the value is reused without prompting, unless `alwaysPrompt` is `true`. If the required input is missing, execution pauses and asks the user or an authorized AI. The answer is added to the input object and also stored in the step variable (`as`, or the input name by default).
+
+Placeholders support `${input.message}`, nested paths such as `${input.query.text}`, `${vars.name}`, and the moustache forms `{{input.query}}` and `{{vars.name}}`. `extract` stores into `vars.result` by default, or into the name given by `as`; `extractAll` stores an array. The root `output` object or value defines the final output, and output placeholders can return JSON values and arrays, not only strings.
+
+`waitFor.condition` supports `element` (default), `text`, `url`, `hidden` / `element_hidden` and `custom`. A `custom` condition is a JavaScript expression evaluated inside the workflow page.
+
+#### BeanShell `.bshflow`
+
+`.bshflow` runs through `bsh.Interpreter` by reflection. Syntax validation uses `bsh.Parser` without executing the script. BeanShell comes from `app/libs/bsh-2.0b4.jar`, which is part of this repository.
+
+The script receives the `browser` and `workflow` objects. These functions are defined by the runtime: `printLog(Object)`, `logInfo(Object)`, `logWarn(Object)`, `logError(Object)`, `input(String prompt)` and `input(String prompt, String inputKey)`. `input(prompt)` opens an interactive prompt. `input(prompt, key)` uses an input value that was already provided, and otherwise prompts and stores the answer under that key.
+
+```java
+String query = input("Enter the search query");
+printLog("Query received: " + query);
+browser.navigate("https://example.com/search?q=" + query);
+String title = browser.extract("h1");
+browser.setResult(title);
+```
+
+Available `browser` / `workflow` methods: `navigate(url[, timeoutMs])`, `waitFor(selector, timeoutMs)`, `waitForText(text, timeoutMs)`, `waitForUrl(urlPart, timeoutMs)`, `input(selector, value)`, `click(selector)`, `extract(selector[, attribute])`, `extractAll(selector[, attribute])`, `text(selector)`, `exists(selector)`, `getInput(name)`, `getInputValue(name)`, `getInputJson()`, `setResult(value)`, `getResult()`, `getUrl()`, `printLog(message)`, `logInfo(message)`, `logWarn(message)`, `logError(message)`, `readAsset(path)`, `writeAsset(path, content)`, `assetPath(path)`, `delay(ms)` and `scroll(direction, pixels, selector)`.
+
+#### Optional HTTP endpoints
+
+The endpoint mode is configured per workflow:
+
+- `none` (default): no endpoint and no listening port. The workflow can still run manually from the app or through MCP.
+- `shared`: registers a unique path on the shared HTTP listener at `127.0.0.1:8084`. Port `8084` is only bound while at least one active, valid workflow asks for shared mode.
+- `exclusive`: opens one listener on a dedicated port for that workflow. A workflow can own at most one exclusive port, and at most five exclusive listeners are active at once. Port `0` lets the system choose a free ephemeral port; explicit ports from `1024` to `65535` are accepted, except `8084` and `9010`. If a remembered automatic port is now in use, the app asks for a new one.
+
+Example for shared mode: `POST http://127.0.0.1:8084/workflow/search-tes`. An exclusive endpoint uses the port and path shown in the workflow list. The request must be a JSON object of up to 2 MiB (an empty body means `{}`), and it becomes the workflow `input`. The response contains `ok`, `workflowId`, `executionId`, `durationMs` and the workflow result.
+
+Every endpoint is opt-in, and activating a workflow with mode `none` opens no port. The listeners bind to `127.0.0.1`, not to LAN interfaces. Serving endpoints requires `BrowserService` to be running with the server setting enabled. The MCP server stays on `9010`, and the Cloudflare tunnel still targets that MCP port, never the workflow ports.
+
+Each execution uses a separate WebView instance, so its navigation and DOM state do not change the main model browser. The default WebView cookie and profile storage is still shared with the app's other WebViews.
+
+#### Interactive input and AI permission
+
+Both `.flow` and `.bshflow` can pause for input. The workflow log screen has an `INTERACTIVE` tab with a native field and a **Kirim input** button. Every prompt is tied to a unique `workflow_id`, `execution_id` and `prompt_id`, and prompts and submissions are timestamped to the millisecond. A prompt has a bounded timeout (default 10 minutes, maximum 30 minutes). The supported input types are `text`, `number`, `password`, `boolean` and `choice`.
+
+An AI can inspect pending prompts and submit answers through MCP. Reading pending prompts is allowed even when write access is disabled. Each workflow has `permissions.aiWriteInput`, which defaults to `false` and is controlled only by the **Izinkan AI mengirim input interaktif** toggle in the local editor. MCP tools and imported ZIP metadata cannot grant it to themselves. While it is `false`, `workflow.submit_input` is rejected for that workflow, but human input in the app stays allowed. The runtime enforces this check; it does not rely on the UI. AI submissions must give matching workflow, execution and prompt IDs.
+
+#### Running and managing workflows through MCP
+
+`workflow.run` executes synchronously and needs neither activation nor an HTTP endpoint. For workflows that may pause for interactive input, use `workflow.start`: it returns an execution ID once the execution is registered, so the model can call `workflow.get_pending_input`, submit an answer (when the per-workflow permission is on) and poll `workflow.get_execution` until the status leaves `running`. The possible states are `waiting_input`, `running`, `completed` and `failed`; `waiting_input` means a prompt should be fetched. A finished execution includes its result or error.
+
+JSON inputs go in the `input` argument. Binary assets move through the MCP file tools as base64. `metadata.json` is changed through structured metadata operations (`workflow.create` and `workflow.update`), not through the general file writer.
+
+#### Logs
+
+Logs are kept in the private SQLite database `workflow_log.db`, table `workflow_logs`, and are shared by the terminal-style screen and the MCP log tools. The log screen of each workflow separates `INFO`, `ERROR` and `INTERACTIVE`. An entry contains a timestamp (`yyyy-MM-dd HH:mm:ss.SSS`), the event, the message, the source file, the line or step when available, the execution ID and optional details.
+
+The MCP log filters accept `since` with `last_5m`, `last_30m`, `last_1h` or `all`, plus an optional level, workflow, execution ID, an explicit lower timestamp in epoch milliseconds, `limit` and `offset`. The database keeps the newest 20,000 records.
+
+### Service and tunnel
+
+- The Cloudflare tunnel never starts by itself from `BrowserService`. It starts only when the user presses the tunnel action in **Service & Tunnel**.
+- That action is a start/stop toggle, and it offers a retry if the last start failed. The tunnel intent lives in memory only, so a service or process restart does not reopen a public tunnel on its own.
+- Saved tunnel URLs are cleared when the service process is recreated and when the tunnel stops. If the tunnel process exits, the app records the exit instead of keeping a stale public URL. Reconnection is only attempted after a manual start, and only while that service instance stays alive.
+- The tunnel is started with `libcloudflared.so tunnel --url http://127.0.0.1:9010`. `cloudflared` prints a `trycloudflare` subdomain and the app stores it as the public URL.
+- An in-process health check runs every 60 seconds. If the MCP listener stops while the service process is still alive, the service recreates it, and the workflow HTTP listener is checked and restarted the same way.
+- The recovery alarm interval is 10 minutes, and a failed listener start is retried sooner.
+
+**Reliability limits.** Android and Vivo can still terminate the app process, especially after a force-stop or because of vendor-specific restrictions. A foreground service with AlarmManager recovery is best-effort, not a guarantee. The in-process health check cannot run once the whole process is killed; the external recovery alarm covers that case, and Android may delay it in idle modes. Battery optimization and autostart settings are usually needed on Vivo devices.
+
+### Authentication and security
+
+- Bearer-token authentication is optional. When it is enabled, requests are only accepted with the correct token (`Authorization: Bearer <token>`).
+- The local endpoint is limited to the device. A public tunnel can expose the browser to the internet, so enable the token before you start one. The app is not secure by default for the public internet without access control.
+- Workflow HTTP listeners bind to `127.0.0.1` only, and the tunnel never targets them.
+- Workflow AI write permission is per workflow and can only be granted from the local editor.
+- The manifest allows cleartext HTTP traffic, so pages loaded over `http://` work.
+
+### Permissions
+
+`INTERNET`, `ACCESS_NETWORK_STATE`, `READ_EXTERNAL_STORAGE` (up to API 32), `MANAGE_EXTERNAL_STORAGE`, `WAKE_LOCK`, `POST_NOTIFICATIONS`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `RECEIVE_BOOT_COMPLETED` and `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`. The service runs as a `dataSync` foreground service.
+
+### Build and run
+
+1. Clone this repository, or download it as a ZIP.
+2. Open the project in AIDE (the project uses a Java 7 style).
+3. Make sure `app/libs/bsh-2.0b4.jar` and `app/src/main/jniLibs/arm64-v8a/libcloudflared.so` are present. Both are in the repository. The tunnel binary targets `arm64-v8a`; other ABIs need a matching `cloudflared` binary.
+4. Build and install the app on an Android device.
+5. Open the app, enable the browser/MCP server and, if you need it, the tunnel.
+6. Connect your AI client to the local endpoint or to the public tunnel URL.
+
+### License
+
+This repository uses the MIT license. See `LICENSE` for the full terms.
+
+---
 
 ## Bahasa Indonesia
 
-<a id="bahasa-indonesia"></a>
+Aplikasi Android yang memberi model AI akses ke browser seluler sungguhan lewat Model Context Protocol (MCP). Aplikasi ini menjalankan browser `WebView` lokal yang dikendalikan client AI lewat endpoint MCP di localhost atau lewat tunnel publik, sehingga model bisa membuka halaman, membaca DOM, mengklik elemen, mengisi form, mengambil screenshot, dan mengakses resource halaman tanpa browser desktop. Aplikasi ini juga punya subsistem Workflow untuk menyimpan skrip otomasi di perangkat dan menjalankannya sesuai kebutuhan.
 
-browser android yang memberi akses browser ke model ai melalui protokol mcp (model context protocol) standar. aplikasi ini berjalan sebagai browser webview lokal yang bisa dikendalikan dari client ai lewat endpoint mcp di localhost maupun melalui tunnel publik, sehingga model bisa membuka halaman, membaca isi DOM, mengklik elemen, mengisi form, mengambil screenshot, dan mengakses resource web tanpa harus membuat browser desktop sendiri.
+**Versi saat ini:** `1.5.0-models-browser.beta` (version code `151`), package `rh.browser.models`. Membutuhkan Android 6.0 (API 23) atau lebih baru dan menargetkan API 30. Kodenya bergaya Java 7, dan BeanShell dimuat lewat reflection.
 
-### ringkasan
+### Fitur
 
-repo ini berisi aplikasi android native yang menggabungkan:
+- Browser `WebView` yang tetap hidup di foreground service, bahkan saat aplikasi tidak terlihat
+- Server MCP (JSON-RPC lewat HTTP) dengan 48 tool: 27 tool browser dan 21 tool workflow
+- Tool registry yang bisa dinyalakan atau dimatikan per tool atau per kategori, dengan mode akses read/write
+- Autentikasi bearer token opsional untuk endpoint MCP
+- Cloudflare quick tunnel yang dinyalakan manual oleh pengguna
+- Subsistem Workflow: skrip `.flow` deklaratif dan skrip BeanShell `.bshflow`, editor native, log eksekusi, input interaktif, dan endpoint HTTP lokal opsional
+- Layar download manager bawaan
+- Watchdog pemulihan dan health check dalam proses untuk listener
 
-- browser webview internal
-- server mcp yang mengekspos tool browser ke client ai
-- tunnel publik berbasis cloudflared untuk akses eksternal
-- panel pengaturan untuk mengelola server, autentikasi, dan izin background
-- mekanisme tool registry yang bisa diaktifkan/ditutup per kategori atau per tool
+### Arsitektur
 
-secara umum, project ini bukan sekadar browser biasa. ini adalah bridge antara model ai dan pengalaman browsing di perangkat android.
-
-### tujuan proyek
-
-proyek ini dibuat untuk menjembatani kebutuhan model ai agar bisa:
-
-- membuka halaman web tertentu
-- menavigasi antar halaman
-- membaca informasi halaman
-- mengklik elemen interaktif
-- mengisi input dan form
-- mengambil screenshot
-- mengakses resource seperti html, gambar, atau file yang di-load halaman
-- beroperasi dari background service dan tetap berjalan meski aplikasi tidak terlihat di foreground
-
-ide utamanya adalah: model ai cukup memanggil tool mcp, lalu android app menjalankan operasi di browser webview nyata.
-
-### arsitektur aplikasi
-
-project ini berisi satu modul android app dengan struktur utama seperti ini:
+Project ini satu modul Android. Source Java ada di `app/src/main/java/rh/browser/models/`.
 
 ```text
 browser-for-models/
 ├── app/
-│   ├── build.gradle
-│   ├── proguard-rules.pro
-│   └── src/
-│       └── main/
-│           ├── AndroidManifest.xml
-│           ├── assets/
-│           │   └── fonts/
-│           ├── java/rh/browser/models/
-│           │   ├── BootReceiver.java
-│           │   ├── BrowserDownloads.java
-│           │   ├── BrowserManager.java
-│           │   ├── BrowserService.java
-│           │   ├── DownloadsActivity.java
-│           │   ├── MainActivity.java
-│           │   ├── McpServer.java
-│           │   ├── ServiceRecoveryReceiver.java
-│           │   ├── ServiceSettingsActivity.java
-│           │   ├── ToolDef.java
-│           │   ├── ToolRegistry.java
-│           │   ├── ToolSettings.java
-│           │   ├── ToolSettingsActivity.java
-│           │   └── UiKit.java
-│           ├── jniLibs/arm64-v8a/libcloudflared.so
-│           └── res/
-│               ├── drawable*
-│               ├── layout/
-│               └── values/
+│   ├── libs/bsh-2.0b4.jar                  (BeanShell)
+│   └── src/main/
+│       ├── AndroidManifest.xml
+│       ├── assets/fonts/
+│       ├── java/rh/browser/models/
+│       ├── jniLibs/arm64-v8a/libcloudflared.so
+│       └── res/
 ├── build.gradle
 ├── settings.gradle
 ├── .gitignore
@@ -82,550 +297,219 @@ browser-for-models/
 └── README.md
 ```
 
-### komponen penting
+#### File source utama
 
-#### 1. MainActivity
-`MainActivity.java` adalah layar utama app. ia menyiapkan ui browser sederhana dengan:
+- `MainActivity`: layar browser, berisi address bar, back/forward/reload, aksi buka dan salin URL, serta panel kontrol browser. Layar ini menampilkan WebView milik service.
+- `BrowserService`: foreground service yang menjalankan `BrowserManager`, `McpServer`, listener HTTP workflow, dan tunnel opsional. Service ini juga menjalankan health check dan logika pemulihan.
+- `BrowserManager`: melakukan operasi WebView yang nyata: membuka halaman, inspeksi dan pencarian DOM, klik dan klik koordinat, input teks dan file, pemilihan opsi, tombol keyboard, scroll, source halaman, screenshot, resource halaman, pengamatan network, dan console.
+- `McpServer`: server HTTP JSON-RPC. Server ini menangani `initialize`, `ping`, `tools/list`, `resources/list`, `prompts/list`, dan `tools/call`, serta memeriksa bearer token jika autentikasi aktif.
+- `ToolRegistry`, `ToolDef`, `ToolSettings`, `ToolSettingsActivity`: definisi tool beserta input schema, kategori, mode akses, dan status default, ditambah layar pengaturan **Tool Browser** yang menyimpan `auth_enabled`, `mcp_token`, `server_enabled`, toggle per tool, dan status read/write per kategori.
+- `ServiceSettingsActivity`: layar **Service & Tunnel** untuk status server, tunnel, endpoint lokal dan token, autentikasi, optimasi baterai, serta pengaturan autostart Vivo.
+- `BrowserDownloads`, `DownloadsActivity`: layar download manager.
+- `McpFileProvider`: content provider read-only yang menyajikan file yang disiapkan di cache aplikasi (`mcp_input_files`).
+- `ServiceRecoveryReceiver`, `BootReceiver`: watchdog best-effort dan receiver untuk boot/penggantian package.
+- `UiKit`: helper UI native bersama.
+- `WorkflowManager`: penyimpanan native, metadata, database log, import/export ZIP, dan API manajemen MCP.
+- `WorkflowExecutor`: menjalankan job `.flow` deklaratif dan job `.bshflow` BeanShell, masing-masing di WebView sendiri.
+- `WorkflowBrowser`: WebView independen yang dipakai workflow.
+- `WorkflowRuntimeApi`: permukaan objek yang bisa dipakai skrip workflow BeanShell.
+- `WorkflowHttpServer`: endpoint HTTP lokal opsional milik workflow.
+- `WorkflowActivity`, `WorkflowEditorActivity`, `WorkflowLogActivity`, `WorkflowExecutionException`: daftar workflow, editor native, layar log, dan tipe error eksekusi.
 
-- address bar
-- tombol navigasi basic (back, forward, reload)
-- tombol buka url
-- tombol copy url
-- panel control browser
-- embed webview yang diambil dari service
+### Cara kerja
 
-fungsi utama:
+1. Pengguna membuka aplikasi, lalu `MainActivity` terhubung ke `BrowserService`.
+2. `BrowserService` menjalankan `BrowserManager` dan `McpServer` (port `9010`).
+3. Client AI terhubung ke `http://127.0.0.1:9010/mcp`, atau ke tunnel publik jika pengguna sudah menyalakannya.
+4. Client memanggil `tools/list`, memilih tool, lalu memanggilnya lewat JSON-RPC.
+5. `BrowserManager` (atau runtime workflow) mengoperasikan WebView yang nyata.
+6. Hasilnya kembali sebagai konten MCP: teks, gambar, atau blob/resource.
 
-- menampilkan browser webview sebagai surface utama
-- menghubungkan ke `BrowserService`
-- menampilkan status browser
-- menjalankan navigasi user dari app
+Endpoint kesehatan ada di `http://127.0.0.1:9010/health`.
 
-#### 2. BrowserService
-`BrowserService.java` adalah inti background service. ia bertanggung jawab untuk:
+### Tool MCP
 
-- menjalankan `BrowserManager`
-- menjalankan `McpServer`
-- menjalankan tunnel cloudflare bila diaktifkan
-- menjaga service tetap hidup di foreground
-- memantau health server
-- menangani lifecycle app dan recovery background
+Setiap tool punya input schema, kategori (`browser` atau `workflow`), mode akses (read atau write), dan status default aktif. Tool bisa dimatikan satu per satu di **Tool Browser**.
 
-beberapa fitur penting:
+**Tool browser (27)**
 
-- server mcp aktif di port `9010`
-- endpoint lokal: `http://127.0.0.1:9010/mcp`
-- endpoint kesehatan: `/health`
-- tunnel publik dibuat via `cloudflared` native binary
-- notification foreground dan recovery receiver untuk menjaga service tetap aktif
+- Navigasi dan profil halaman: `browser.open`, `browser.back`, `browser.wait_for`, `browser.set_mode`, `browser.set_viewport`, `browser.set_user_agent`
+- Inspeksi dan pembacaan: `browser.inspect`, `browser.search_element`, `browser.get_element`, `browser.source`, `browser.screenshot`, `browser.map_coordinates`, `browser.item.list`, `browser.get.item`, `browser.network`, `browser.debug.console`
+- Interaksi: `browser.click`, `browser.click_at`, `browser.scroll`, `browser.press_key`, `browser.input`, `browser.input_text`, `browser.input_files`, `browser.input_option`
+- Data situs: `browser.clear_cookies`, `browser.clear_localstorage`, `browser.clear_sessionstorage`
 
-#### 3. McpServer
-`McpServer.java` adalah server kecil yang menerima request json-rpc/mcp dari client. ia menangani:
+Beberapa catatan tentang tool tersebut:
 
-- `initialize`
-- `ping`
-- `tools/list`
-- `resources/list`
-- `prompts/list`
-- `tools/call`
+- `browser.inspect` mengembalikan elemen interaktif dengan referensi `eN`. Referensi hanya berlaku untuk hasil inspeksi terbaru.
+- `browser.wait_for` mendukung kondisi `element`, `text`, `url`, `load`, `hidden`, `network_idle`, dan `custom`.
+- `browser.map_coordinates` mengembalikan screenshot viewport dengan grid berlabel, sehingga elemen visual bisa dipetakan ke `browser.click_at`.
+- `browser.input_files` memasukkan file ke `input type=file` lewat file chooser WebView native. Sumbernya bisa berupa path, URL, base64, atau konten langsung.
+- `browser.network` menampilkan request yang teramati. Tanpa argumen, tool ini mengembalikan semuanya, dan filter opsional digabung dengan logika AND.
+- `browser.item.list` dan `browser.get.item` mendaftar resource yang dirujuk halaman dan mengambil ulang satu resource berdasarkan ID item.
 
-server ini mendukung request HTTP dan mengurai payload JSON, lalu memanggil tool yang ada di `ToolRegistry`. ia juga punya mekanisme otorisasi bearer token bila autentikasi diaktifkan.
+**Tool workflow (21)**
 
-#### 4. ToolRegistry
-`ToolRegistry.java` mendefinisikan tool-tool yang bisa dipanggil oleh model ai. tool-tool ini adalah inti dari kemampuan browser automation. beberapa tool utama:
+- Manajemen: `workflow.list`, `workflow.create`, `workflow.update`, `workflow.delete`
+- File: `workflow.list_files`, `workflow.read_file`, `workflow.write_file`, `workflow.create_folder`, `workflow.delete_file`
+- Siklus hidup: `workflow.validate`, `workflow.activate`, `workflow.deactivate`
+- Eksekusi: `workflow.run`, `workflow.start`, `workflow.get_execution`
+- Input interaktif: `workflow.get_pending_input`, `workflow.submit_input`
+- Log: `workflow.get_logs`, `workflow.get_info_logs`, `workflow.get_error_logs`, `workflow.get_errors`
 
-- `browser.open`
-- `browser.back`
-- `browser.inspect`
-- `browser.click`
-- `browser.input`
-- `browser.scroll`
-- `browser.source`
-- `browser.screenshot`
-- `browser.clear_cookies`
-- `browser.clear_localstorage`
-- `browser.clear_sessionstorage`
-- `browser.set_user_agent`
-- `browser.set_mode`
-- `browser.set_viewport`
-- `browser.item.list`
-- `browser.get.item`
-- `browser.debug.console`
+### Subsistem Workflow
 
-setiap tool punya schema input, kategori, access mode, dan default enabled flag. ini memungkinkan pengaturan tool per kategori read/write dengan `ToolSettings.java`.
+Workflow adalah otomasi tersimpan yang berjalan di WebView-nya sendiri. Workflow bisa dibuat dan diedit di aplikasi atau lewat tool workflow MCP.
 
-#### 5. BrowserManager
-`BrowserManager.java` adalah komponen kerja browser paling penting. ia berisi implementasi operasi browser real di webview, seperti:
+#### Struktur penyimpanan
 
-- membuka halaman dan menunggu render
-- menghitung dan menemukan elemen DOM
-- klik elemen berdasarkan selector atau ref
-- mengisi form
-- scroll halaman
-- membaca HTML sumber halaman
-- menangkap screenshot
-- mengakses resource pada halaman aktif
-- debug console log webview
-
-meski file ini besar, fungsi utamanya adalah menjalankan aksi nyata pada webview. ini adalah tempat semua kemampuan browser diimplementasikan.
-
-#### 6. ToolSettings dan model keamanan
-`ToolSettings.java` menampung konfigurasi akses tool dan keamanan. ia mengelola:
-
-- `auth_enabled`
-- `mcp_token`
-- `server_enabled`
-- per-tool toggle
-- category read/write status
-
-kebijakan umum:
-
-- tool bisa dinonaktifkan satu per satu
-- category bisa dibatasi read/write
-- token bearer opsional untuk autentikasi request mcp
-- server dapat diaktifkan/dinonaktifkan melalui app settings
-
-#### 7. ServiceSettingsActivity
-`ServiceSettingsActivity.java` menyediakan cara user untuk:
-
-- mengelola server mcp
-- melihat status server
-- melihat status tunnel
-- menyalakan/matikan tunnel
-- menyalin endpoint lokal dan token
-- mengaktifkan autentikasi bearer token
-- mengatur optimasi baterai dan autostart khusus perangkat vivo
-
-ini sangat relevan karena app dirancang agar berjalan di background, bahkan di perangkat yang agresif dalam membatasi proses background.
-
-### alur kerja umum
-
-1. user membuka app
-2. `MainActivity` menghubungkan ke `BrowserService`
-3. `BrowserService` memulai `BrowserManager` dan `McpServer`
-4. client ai menghubungi `http://127.0.0.1:9010/mcp` atau tunnel publik
-5. client melakukan `tools/list` dan memilih tool yang dibutuhkan
-6. tool dipanggil melalui JSON-RPC
-7. `BrowserManager` mengoperasikan webview
-8. hasil dikembalikan dalam format MCP content, bisa berupa text, image, atau blob/resource
-
-### bagaimana tunnel publik bekerja
-
-ketika server aktif, `BrowserService` juga bisa memulai `cloudflared` native library untuk membuka tunnel ke internet publik. ini dibuat dengan command seperti:
+Workflow disimpan secara privat di `files/workflows/<id>/`. `metadata.json` dibuat dan diperbarui oleh editor atau oleh tool metadata MCP yang terstruktur; penulis workflow biasanya hanya mengedit file skrip.
 
 ```text
-libcloudflared.so tunnel --url http://127.0.0.1:9010
+search-tes/
+├── metadata.json
+├── script/
+│   ├── main.flow
+│   └── helpers.bshflow
+└── assets/
+    ├── config.json
+    ├── template.html
+    └── images/
+        └── logo.png
 ```
 
-cloudflared akan menampilkan subdomain `trycloudflare`, lalu app menyimpannya sebagai public URL. jadi client bisa menjangkau browser dari luar perangkat android, asalkan otorisasi dan pengaturan keamanan diatur dengan benar.
+Aplikasi membuat folder `script/` dan `assets/`. Editor bisa membuat dan membuka file serta folder, mengedit teks, menghapus file, mengimpor aset biner, memilih entry point, dan mengekspor atau mengimpor seluruh workflow sebagai ZIP. Installer mengharapkan `workflow/metadata.json` beserta entri `workflow/script/` dan `workflow/assets/` di dalam ZIP.
 
-### autentikasi dan keamanan
+#### Metadata dan siklus hidup
 
-repo ini punya mekanisme keamanan dasar:
+Field metadata mencakup `id`, `name`, `description`, `format`, `entry`, `enabled`, `endpoint`, dan `permissions`. Editor memperlakukan metadata sebagai field form, bukan editor JSON mentah. Workflow baru atau hasil impor tetap nonaktif sampai diaktifkan secara eksplisit.
 
-- bearer token opsional
-- request hanya diterima bila token benar jika autentikasi aktif
-- `Authorization: Bearer <token>` dapat dipakai pada client yang mendukungnya
-- local endpoint tetap terbatas di perangkat itu sendiri
-- tunnel publik perlu dikelola dengan hati-hati karena bisa mengekspos browser ke internet
+`enabled` adalah status aktivasi yang diinginkan. Endpoint adalah jalur transport terpisah yang opsional: workflow bisa dipasang dan dijalankan tanpa membuka port HTTP apa pun.
 
-catatan penting: repo ini bukan aplikasi secure-by-default untuk internet publik tanpa kontrol akses. pengaturan token dan firewall/tunnel kontrol tetap penting.
+#### `.flow` deklaratif
 
-### teknologi yang dipakai
+File `.flow` adalah JSON UTF-8 dengan array `steps`:
 
-- bahasa: java
-- platform: android native
-- ui: android widgets + custom ui kit
-- web rendering: android `WebView`
-- protocol: MCP (model context protocol)
-- network: HTTP JSON-RPC over localhost dan tunnel
-- native binary: `libcloudflared.so`
-
-### pengaturan build
-
-project menggunakan Gradle Android lama dengan konfigurasi seperti ini:
-
-```gradle
-buildscript {
-    repositories {
-        jcenter()
-    }
-    dependencies {
-        classpath 'com.android.tools.build:gradle:1.+'
-    }
+```json
+{
+  "steps": [
+    { "action": "navigate", "url": "https://example.com" },
+    { "action": "extract", "selector": "h1", "as": "title" }
+  ],
+  "output": { "title": "${vars.title}" }
 }
 ```
 
-and modul app:
+Aksi yang didukung:
 
-```gradle
-apply plugin: 'com.android.application'
+- `navigate` / `open`
+- `waitFor` / `wait_for` / `wait`
+- `input` / `prompt` / `input_prompt` (prompt interaktif) dan `input` / `fill` (input DOM)
+- `click`
+- `extract`, `extractAll` / `extract_all`
+- `set`, `delay` / `sleep`, `scroll`, `assert`
+- `respond` / `return`
+- `log` / `printLog`
+- `readAsset` / `read_asset` dan `writeAsset` / `write_asset` untuk file aset teks atau base64 (`readAsset` bisa memakai `parseJson: true` untuk mengurai aset JSON menjadi nilai)
 
-android {
-    compileSdkVersion 21
-    buildToolsVersion "21.1.0"
-    defaultConfig {
-        applicationId "rh.browser.models"
-        minSdkVersion 14
-        targetSdkVersion 29
-        versionCode 1
-        versionName "1.0"
-    }
+Untuk langkah input DOM, isi `selector`. Prompt interaktif berbentuk seperti ini:
+
+```json
+{
+  "action": "input",
+  "name": "query",
+  "prompt": "Masukkan query pencarian",
+  "inputType": "text",
+  "required": true,
+  "timeout": 600000
 }
 ```
 
-catatan: project ini mengikuti pola android legacy, jadi build paling cocok di lingkungan android yang masih mendukung Gradle lama dan repository `jcenter`.
+Langkah interaktif memeriksa `input.query` terlebih dahulu. Jika pemanggil sudah menyediakannya, nilainya dipakai tanpa prompt, kecuali `alwaysPrompt` bernilai `true`. Jika input yang wajib belum ada, eksekusi dijeda dan meminta nilainya ke pengguna atau AI yang diberi izin. Jawabannya ditambahkan ke objek input dan juga disimpan di variabel langkah (`as`, atau nama input secara default).
 
-### persyaratan runtime
+Placeholder mendukung `${input.message}`, path bersarang seperti `${input.query.text}`, `${vars.name}`, serta bentuk moustache `{{input.query}}` dan `{{vars.name}}`. `extract` menyimpan ke `vars.result` secara default, atau ke nama yang diberikan lewat `as`; `extractAll` menyimpan array. Objek atau nilai `output` di root menentukan output akhir, dan placeholder di output bisa mengembalikan nilai JSON dan array, bukan hanya string.
 
-- Android 6+ (API 23 minimum berdasarkan manifest)
-- internet permission
-- foreground service permission
-- notification permission pada Android 13+
-- background service mungkin butuh pengaturan khusus pada Vivo dan perangkat vendor tertentu
+`waitFor.condition` mendukung `element` (default), `text`, `url`, `hidden` / `element_hidden`, dan `custom`. Kondisi `custom` adalah ekspresi JavaScript yang dievaluasi di dalam halaman workflow.
 
-### panduan build lokal
+#### `.bshflow` BeanShell
 
-1. pastikan Android Studio terpasang
-2. buka repo ini sebagai project Android
-3. pastikan Gradle sync bisa menangani plugin lama
-4. pilih module `app`
-5. build debug atau release
-6. install ke perangkat Android
-7. buka aplikasi dan aktifkan server browser/MCP
-8. gunakan endpoint lokal atau tunnel publik sesuai kebutuhan
+`.bshflow` dijalankan lewat `bsh.Interpreter` secara reflektif. Validasi sintaks memakai `bsh.Parser` tanpa menjalankan skrip. BeanShell berasal dari `app/libs/bsh-2.0b4.jar`, yang menjadi bagian dari repository ini.
 
-### catatan penting untuk pengembangan
+Skrip menerima objek `browser` dan `workflow`. Fungsi berikut didefinisikan oleh runtime: `printLog(Object)`, `logInfo(Object)`, `logWarn(Object)`, `logError(Object)`, `input(String prompt)`, dan `input(String prompt, String inputKey)`. `input(prompt)` membuka prompt interaktif. `input(prompt, key)` memakai nilai input yang sudah diberikan, dan jika belum ada, fungsi ini menampilkan prompt lalu menyimpan jawabannya di key tersebut.
 
-- repo ini sangat bergantung pada `WebView` dan lifecycle Android
-- penggunaan service foreground sangat penting agar server tetap hidup
-- cloudflared native library harus kompatibel dengan ABI perangkat
-- pengaturan battery optimization dan autostart sering dibutuhkan di perangkat Vivo
-- pengaturan auth token sangat disarankan bila tunnel dibuat publik
-
-### kesimpulan
-
-repo `reyhanaarch64/browser-for-models` adalah aplikasi Android yang mengubah browser handphone jadi alat interaksi model AI via MCP. ia menggabungkan browser WebView, server MCP, tool registry, dan tunnel publik dalam satu paket yang bisa dipakai untuk automasi browsing real-time.
-
-fitur terkuat repo ini adalah kemampuannya untuk membiarkan model AI mengakses browser seperti manusia — buka halaman, klik, input, baca HTML, ambil screenshot, dan ekspose tool melalui protocol standard. ini cocok untuk eksperimen AI agent berbasis browser di perangkat Android.
-
-### lisensi
-
-repo ini memakai lisensi MIT. lihat file `LICENSE` untuk detail lengkap.
-
-### rekomendasi lanjutan
-
-beberapa hal yang bisa ditambahkan untuk proyek ini ke depannya:
-
-- dokumentasi penggunaan API MCP per tool
-- contoh client curl / Python yang mengakses endpoint
-- dokumentasi payload response untuk tool screenshot dan resource
-- sandboxing keamanan untuk tool write pada situs tertentu
-- pemeriksaan website yang diizinkan agar browser tidak bisa mengakses sembarang domain
-- CI pipeline untuk build Android
-- uji integrasi untuk tool browser basic
-
----
-
-## English (US)
-
-<a id="english-us"></a>
-
-Rh Browser for Models is an Android application that gives AI models access to a real mobile browser through the standard MCP (Model Context Protocol). The app runs a local WebView browser that can be controlled by an AI client through an MCP endpoint on localhost or via a public tunnel, allowing models to open pages, read the DOM, click elements, fill forms, capture screenshots, and access web resources without building a separate desktop browser.
-
-### overview
-
-This repository contains a native Android app that combines:
-
-- an internal browser WebView
-- an MCP server exposing browser tools to AI clients
-- a public tunnel using Cloudflare tunnel (`cloudflared`)
-- a settings panel for server, authentication, and background permissions
-- a tool registry that can be enabled or disabled by category or by individual tool
-
-In short, this is not just a browser. It is a bridge between AI models and the browsing experience on an Android device.
-
-### project goal
-
-This project is designed to let AI models do things like:
-
-- open a web page
-- navigate between pages
-- read page information
-- click interactive elements
-- fill input fields and forms
-- capture screenshots
-- access resources such as HTML, images, and files loaded by a page
-- keep working in the background while the app is not in the foreground
-
-The core idea is simple: the AI model calls an MCP tool, and the Android app performs the real browser action in a WebView.
-
-### architecture
-
-The project is a single Android app module with the main structure below:
-
-```text
-browser-for-models/
-├── app/
-│   ├── build.gradle
-│   ├── proguard-rules.pro
-│   └── src/
-│       └── main/
-│           ├── AndroidManifest.xml
-│           ├── assets/
-│           │   └── fonts/
-│           ├── java/rh/browser/models/
-│           │   ├── BootReceiver.java
-│           │   ├── BrowserDownloads.java
-│           │   ├── BrowserManager.java
-│           │   ├── BrowserService.java
-│           │   ├── DownloadsActivity.java
-│           │   ├── MainActivity.java
-│           │   ├── McpServer.java
-│           │   ├── ServiceRecoveryReceiver.java
-│           │   ├── ServiceSettingsActivity.java
-│           │   ├── ToolDef.java
-│           │   ├── ToolRegistry.java
-│           │   ├── ToolSettings.java
-│           │   ├── ToolSettingsActivity.java
-│           │   └── UiKit.java
-│           ├── jniLibs/arm64-v8a/libcloudflared.so
-│           └── res/
-│               ├── drawable*
-│               ├── layout/
-│               └── values/
-├── build.gradle
-├── settings.gradle
-├── .gitignore
-├── LICENSE
-└── README.md
+```java
+String query = input("Masukkan query pencarian");
+printLog("Query diterima: " + query);
+browser.navigate("https://example.com/search?q=" + query);
+String title = browser.extract("h1");
+browser.setResult(title);
 ```
 
-### key components
+Method `browser` / `workflow` yang tersedia: `navigate(url[, timeoutMs])`, `waitFor(selector, timeoutMs)`, `waitForText(text, timeoutMs)`, `waitForUrl(urlPart, timeoutMs)`, `input(selector, value)`, `click(selector)`, `extract(selector[, attribute])`, `extractAll(selector[, attribute])`, `text(selector)`, `exists(selector)`, `getInput(name)`, `getInputValue(name)`, `getInputJson()`, `setResult(value)`, `getResult()`, `getUrl()`, `printLog(message)`, `logInfo(message)`, `logWarn(message)`, `logError(message)`, `readAsset(path)`, `writeAsset(path, content)`, `assetPath(path)`, `delay(ms)`, dan `scroll(direction, pixels, selector)`.
 
-#### 1. MainActivity
-`MainActivity.java` is the app's main screen. It sets up a lightweight browser UI with:
+#### Endpoint HTTP opsional
 
-- an address bar
-- basic browser controls (back, forward, refresh)
-- URL open and copy actions
-- a browser surface embedded inside the activity
-- connection to the background service
+Mode endpoint diatur per workflow:
 
-It mainly handles the browser display and navigation from the user interface.
+- `none` (default): tanpa endpoint dan tanpa port yang didengarkan. Workflow tetap bisa dijalankan manual dari aplikasi atau lewat MCP.
+- `shared`: mendaftarkan path unik di listener HTTP bersama pada `127.0.0.1:8084`. Port `8084` hanya dibuka selama ada minimal satu workflow aktif dan valid yang meminta mode shared.
+- `exclusive`: membuka satu listener di port khusus untuk workflow tersebut. Satu workflow maksimal memiliki satu port exclusive, dan paling banyak lima listener exclusive aktif sekaligus. Port `0` membuat sistem memilih port ephemeral yang bebas; port eksplisit `1024` sampai `65535` diterima, kecuali `8084` dan `9010`. Jika port otomatis yang diingat sedang dipakai, aplikasi meminta port baru.
 
-#### 2. BrowserService
-`BrowserService.java` is the background service. It is responsible for:
+Contoh mode shared: `POST http://127.0.0.1:8084/workflow/search-tes`. Endpoint exclusive memakai port dan path yang tampil di daftar workflow. Request harus berupa objek JSON maksimal 2 MiB (body kosong berarti `{}`), dan isinya menjadi `input` workflow. Respons berisi `ok`, `workflowId`, `executionId`, `durationMs`, dan hasil workflow.
 
-- creating and maintaining `BrowserManager`
-- starting `McpServer`
-- launching Cloudflare tunnel when enabled
-- keeping the service alive in foreground mode
-- monitoring server health
-- handling lifecycle and recovery tasks
+Setiap endpoint bersifat opt-in, dan mengaktifkan workflow dengan mode `none` tidak membuka port apa pun. Listener hanya terikat ke `127.0.0.1`, bukan ke interface LAN. Endpoint hanya bisa dilayani saat `BrowserService` berjalan dengan pengaturan server aktif. Server MCP tetap di `9010`, dan tunnel Cloudflare tetap mengarah ke port MCP itu, tidak pernah ke port workflow.
 
-Important features:
+Setiap eksekusi memakai instance WebView terpisah, sehingga navigasi dan state DOM-nya tidak mengubah browser utama milik model. Penyimpanan cookie dan profil WebView default tetap dipakai bersama dengan WebView lain di aplikasi.
 
-- MCP server runs on port `9010`
-- local endpoint: `http://127.0.0.1:9010/mcp`
-- health endpoint: `/health`
-- public tunnel is started by the native `cloudflared` binary
-- foreground notifications and recovery receivers help keep the service alive
+#### Input interaktif dan izin AI
 
-#### 3. McpServer
-`McpServer.java` is a lightweight server that accepts HTTP JSON-RPC/MCP requests. It handles:
+`.flow` maupun `.bshflow` bisa berhenti untuk meminta input. Layar log workflow punya tab `INTERACTIVE` dengan kolom input native dan tombol **Kirim input**. Setiap prompt terikat pada `workflow_id`, `execution_id`, dan `prompt_id` yang unik, dan prompt serta pengiriman jawaban dicatat dengan timestamp sampai milidetik. Prompt punya batas waktu (default 10 menit, maksimal 30 menit). Tipe input yang didukung adalah `text`, `number`, `password`, `boolean`, dan `choice`.
 
-- `initialize`
-- `ping`
-- `tools/list`
-- `resources/list`
-- `prompts/list`
-- `tools/call`
+AI bisa melihat prompt yang tertunda dan mengirim jawaban lewat MCP. Membaca prompt yang tertunda tetap diizinkan walau akses write dimatikan. Setiap workflow punya `permissions.aiWriteInput`, yang defaultnya `false` dan hanya dikendalikan oleh toggle **Izinkan AI mengirim input interaktif** di editor lokal. Tool MCP dan metadata ZIP hasil impor tidak bisa memberikan izin itu kepada dirinya sendiri. Selama nilainya `false`, `workflow.submit_input` ditolak untuk workflow tersebut, tetapi input manusia di aplikasi tetap diizinkan. Pemeriksaan ini dilakukan oleh runtime, tidak mengandalkan UI. Pengiriman dari AI harus menyebut ID workflow, eksekusi, dan prompt yang cocok.
 
-It parses JSON payloads from clients and dispatches actions to the registered tools. It also supports bearer-token authentication if enabled.
+#### Menjalankan dan mengelola workflow lewat MCP
 
-#### 4. ToolRegistry
-`ToolRegistry.java` declares the browser tools that AI models can invoke. These tools are the heart of the browser automation layer. Key tools include:
+`workflow.run` dijalankan secara sinkron dan tidak membutuhkan aktivasi maupun endpoint HTTP. Untuk workflow yang mungkin meminta input interaktif, gunakan `workflow.start`: tool ini mengembalikan ID eksekusi setelah eksekusi terdaftar, sehingga model bisa memanggil `workflow.get_pending_input`, mengirim jawaban (jika izin per-workflow aktif), dan memantau `workflow.get_execution` sampai statusnya bukan `running` lagi. Status yang mungkin adalah `waiting_input`, `running`, `completed`, dan `failed`; `waiting_input` berarti ada prompt yang perlu diambil. Eksekusi yang selesai menyertakan hasil atau errornya.
 
-- `browser.open`
-- `browser.back`
-- `browser.inspect`
-- `browser.click`
-- `browser.input`
-- `browser.scroll`
-- `browser.source`
-- `browser.screenshot`
-- `browser.clear_cookies`
-- `browser.clear_localstorage`
-- `browser.clear_sessionstorage`
-- `browser.set_user_agent`
-- `browser.set_mode`
-- `browser.set_viewport`
-- `browser.item.list`
-- `browser.get.item`
-- `browser.debug.console`
+Input JSON dikirim lewat argumen `input`. Aset biner dipindahkan lewat tool file MCP dalam bentuk base64. `metadata.json` diubah lewat operasi metadata terstruktur (`workflow.create` dan `workflow.update`), bukan lewat penulis file umum.
 
-Each tool has an input schema, category, access mode, and default enabled flag. This allows the app to control access per tool or by category with `ToolSettings.java`.
+#### Log
 
-#### 5. BrowserManager
-`BrowserManager.java` is the most important browser engine. It implements real browser operations in a `WebView`, including:
+Log disimpan di database SQLite privat `workflow_log.db`, tabel `workflow_logs`, dan dipakai bersama oleh layar bergaya terminal dan tool log MCP. Layar log tiap workflow memisahkan `INFO`, `ERROR`, dan `INTERACTIVE`. Satu entri berisi timestamp (`yyyy-MM-dd HH:mm:ss.SSS`), event, pesan, file sumber, baris atau langkah bila ada, ID eksekusi, dan detail opsional.
 
-- opening a page and waiting for render completion
-- detecting page elements in the DOM
-- clicking elements using selector or reference data
-- filling form inputs
-- scrolling the page
-- reading page source and text
-- capturing screenshots
-- accessing page resources
-- reading console logs
+Filter log MCP menerima `since` dengan `last_5m`, `last_30m`, `last_1h`, atau `all`, ditambah level, workflow, ID eksekusi, batas bawah timestamp eksplisit dalam epoch milidetik, `limit`, dan `offset` secara opsional. Database menyimpan 20.000 record terbaru.
 
-This is where the app performs the actual browser actions.
+### Service dan tunnel
 
-#### 6. ToolSettings and security model
-`ToolSettings.java` manages access and security configuration, including:
+- Tunnel Cloudflare tidak pernah menyala sendiri dari `BrowserService`. Tunnel hanya dimulai ketika pengguna menekan aksi tunnel di **Service & Tunnel**.
+- Aksi itu berupa toggle mulai/berhenti, dan menawarkan coba lagi jika percobaan terakhir gagal. Niat menyalakan tunnel hanya ada di memori, jadi restart service atau proses tidak membuka kembali tunnel publik secara otomatis.
+- URL tunnel yang tersimpan dibersihkan saat proses service dibuat ulang dan saat tunnel dihentikan. Jika proses tunnel keluar, aplikasi mencatat keluarnya proses itu, bukan menyimpan URL publik yang sudah usang. Penyambungan ulang hanya dicoba setelah pengguna menyalakannya secara manual, dan hanya selama instance service itu masih hidup.
+- Tunnel dijalankan dengan `libcloudflared.so tunnel --url http://127.0.0.1:9010`. `cloudflared` menampilkan subdomain `trycloudflare`, lalu aplikasi menyimpannya sebagai URL publik.
+- Health check dalam proses berjalan setiap 60 detik. Jika listener MCP berhenti padahal proses service masih hidup, service membuatnya ulang, dan listener HTTP workflow diperiksa serta dijalankan ulang dengan cara yang sama.
+- Interval alarm pemulihan adalah 10 menit, dan startup listener yang gagal dicoba ulang lebih cepat.
 
-- `auth_enabled`
-- `mcp_token`
-- `server_enabled`
-- per-tool toggles
-- category read/write states
+**Batasan keandalan.** Android dan Vivo tetap bisa menghentikan proses aplikasi, terutama setelah force-stop atau karena pembatasan khusus vendor. Foreground service dengan pemulihan AlarmManager bersifat best-effort, bukan jaminan. Health check dalam proses tidak bisa berjalan setelah seluruh proses dimatikan; alarm pemulihan eksternal menangani kasus itu, dan Android bisa menundanya pada mode idle. Pengaturan optimasi baterai dan autostart biasanya dibutuhkan di perangkat Vivo.
 
-General behavior:
+### Autentikasi dan keamanan
 
-- tools can be disabled individually
-- categories can be restricted by read/write access
-- bearer token authentication is optional
-- the server can be turned on or off in the app settings
+- Autentikasi bearer token bersifat opsional. Saat aktif, request hanya diterima dengan token yang benar (`Authorization: Bearer <token>`).
+- Endpoint lokal terbatas di perangkat itu sendiri. Tunnel publik bisa mengekspos browser ke internet, jadi aktifkan token sebelum menyalakannya. Aplikasi ini tidak aman secara default untuk internet publik tanpa kontrol akses.
+- Listener HTTP workflow hanya terikat ke `127.0.0.1`, dan tunnel tidak pernah mengarah ke sana.
+- Izin AI write per workflow hanya bisa diberikan dari editor lokal.
+- Manifest mengizinkan lalu lintas HTTP cleartext, sehingga halaman `http://` bisa dimuat.
 
-#### 7. ServiceSettingsActivity
-`ServiceSettingsActivity.java` gives the user a way to:
+### Permission
 
-- manage the MCP server
-- view server status
-- view tunnel status
-- start or stop the public tunnel
-- copy the local endpoint and token
-- enable Bearer-token authentication
-- apply battery optimization and Vivo-specific background settings
+`INTERNET`, `ACCESS_NETWORK_STATE`, `READ_EXTERNAL_STORAGE` (sampai API 32), `MANAGE_EXTERNAL_STORAGE`, `WAKE_LOCK`, `POST_NOTIFICATIONS`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `RECEIVE_BOOT_COMPLETED`, dan `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`. Service berjalan sebagai foreground service `dataSync`.
 
-This is important because the app is designed to stay alive in the background, even on devices that aggressively restrict background activity.
+### Build dan menjalankan
 
-### general flow
+1. Clone repository ini, atau unduh sebagai ZIP.
+2. Buka project di AIDE (project memakai gaya Java 7).
+3. Pastikan `app/libs/bsh-2.0b4.jar` dan `app/src/main/jniLibs/arm64-v8a/libcloudflared.so` ada. Keduanya sudah ada di repository. Binary tunnel menargetkan `arm64-v8a`; ABI lain membutuhkan binary `cloudflared` yang sesuai.
+4. Build lalu pasang aplikasi di perangkat Android.
+5. Buka aplikasi, aktifkan server browser/MCP, dan jika perlu, tunnel.
+6. Hubungkan client AI ke endpoint lokal atau ke URL tunnel publik.
 
-1. the user opens the app
-2. `MainActivity` binds to `BrowserService`
-3. `BrowserService` starts `BrowserManager` and `McpServer`
-4. an AI client connects to `http://127.0.0.1:9010/mcp` or a public tunnel
-5. the client calls `tools/list` and chooses a tool
-6. the tool is invoked through JSON-RPC
-7. `BrowserManager` interacts with the WebView
-8. the result is returned in MCP content format, which may be text, image, or binary/resource data
+### Lisensi
 
-### how the public tunnel works
-
-When the server is active, `BrowserService` can launch the native `cloudflared` binary and expose the local MCP server through a public URL. The command is conceptually:
-
-```text
-libcloudflared.so tunnel --url http://127.0.0.1:9010
-```
-
-`cloudflared` prints a `trycloudflare` subdomain, and the app stores it as the public URL. This allows a client outside the device to reach the browser, but only if security settings and authorization are managed correctly.
-
-### authentication and security
-
-The repository includes a basic security model:
-
-- optional bearer token authentication
-- requests are only accepted when the token matches if auth is enabled
-- `Authorization: Bearer <token>` can be used by compatible clients
-- the local endpoint remains limited to the device itself
-- any public tunnel should be treated carefully because it may expose the browser to the internet
-
-Important: this is not a secure-by-default public internet app without access control. Token configuration and tunnel/firewall control are still necessary.
-
-### technologies used
-
-- language: Java
-- platform: native Android
-- UI: Android widgets + custom UI kit
-- rendering: Android `WebView`
-- protocol: MCP (Model Context Protocol)
-- networking: HTTP JSON-RPC over localhost and tunnel
-- native binary: `libcloudflared.so`
-
-### build settings
-
-The project uses legacy Android Gradle configuration, for example:
-
-```gradle
-buildscript {
-    repositories {
-        jcenter()
-    }
-    dependencies {
-        classpath 'com.android.tools.build:gradle:1.+'
-    }
-}
-```
-
-And the app module includes:
-
-```gradle
-apply plugin: 'com.android.application'
-
-android {
-    compileSdkVersion 21
-    buildToolsVersion "21.1.0"
-    defaultConfig {
-        applicationId "rh.browser.models"
-        minSdkVersion 14
-        targetSdkVersion 29
-        versionCode 1
-        versionName "1.0"
-    }
-}
-```
-
-Note: this project follows a legacy Android pattern, so it is best suited to older Android build environments and the `jcenter` repository setup.
-
-### runtime requirements
-
-- Android 6+ (API 23 minimum based on the manifest)
-- internet permission
-- foreground service permission
-- notification permission on Android 13+
-- background services may require special management on Vivo and some OEM devices
-
-### local build guide
-
-1. install Android Studio
-2. open this repository as an Android project
-3. make sure Gradle sync works with the older plugin version
-4. select the `app` module
-5. build debug or release
-6. install it on an Android device
-7. open the app and enable the browser/MCP server
-8. use the local endpoint or public tunnel as needed
-
-### development notes
-
-- the project depends heavily on `WebView` and Android lifecycle behavior
-- foreground services are essential for keeping the server alive
-- the `cloudflared` native library must match the device ABI
-- battery optimization and autostart settings are often required on Vivo devices
-- bearer token authentication is strongly recommended if the tunnel is made public
-
-### summary
-
-`reyhanaarch64/browser-for-models` is an Android app that turns a phone browser into an AI-accessible tool via MCP. It combines a WebView browser, MCP server, tool registry, and public tunnel in one package for real-time browsing automation.
-
-Its strongest feature is that it allows an AI model to interact with a browser much like a human user: open pages, click, type, read page HTML, capture screenshots, and expose tools through a standard protocol. This makes it well suited for browser-based AI agent experiments on Android devices.
-
-### license
-
-This repository uses the MIT license. See `LICENSE` for full terms.
-
----
-
-This README has been updated to provide both Indonesian and English sections with an in-file language switch at the top.
+Repository ini memakai lisensi MIT. Lihat file `LICENSE` untuk ketentuan lengkapnya.

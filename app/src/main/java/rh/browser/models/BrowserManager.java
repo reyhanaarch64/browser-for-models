@@ -1,6 +1,17 @@
 package rh.browser.models;
 
 import android.content.Context;
+import android.content.Intent;
+import android.database.Cursor;
+import android.database.MatrixCursor;
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.os.ParcelFileDescriptor;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.io.FileNotFoundException;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.net.Uri;
@@ -56,22 +67,29 @@ public final class BrowserManager {
     private static final String KEY_VIEWPORT_WIDTH = "viewport_width_css";
     private static final String KEY_VIEWPORT_HEIGHT = "viewport_height_css";
     private static final int MAX_RESOURCE_ITEMS = 500;
+    private static final int MAX_NETWORK_ITEMS = 3000;
     private static final int MAX_RESOURCE_BYTES = 20000000;
     private static final int MAX_RESOURCE_TEXT_CHARS = 250000;
     private static final int MAX_CONSOLE_ENTRIES = 500;
     private static final int MAX_INSPECT_LIMIT = 200;
-    private static final int MAX_SOURCE_CHARS = 100000;
 
     private final Context context;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Object operationLock = new Object();
     private final Object consoleLock = new Object();
     private final Object resourceLock = new Object();
+    private final Object networkLock = new Object();
     private final ArrayList<ResourceEntry> resourceItems = new ArrayList<ResourceEntry>();
+    private final ArrayList<NetworkEntry> networkItems = new ArrayList<NetworkEntry>();
     private int nextResourceId = 1;
+    private int nextNetworkId = 1;
+    private long networkDropped;
+    private long networkScriptDropped;
     private final ArrayList<JSONObject> consoleEntries = new ArrayList<JSONObject>();
 
     private volatile WebView webView;
+    private volatile ValueCallback<Uri[]> pendingFileChooser;
+    private volatile Uri[] pendingFileUris;
     private volatile CountDownLatch pageLoadLatch;
     private volatile String activeUrl = "";
     private volatile String lastPageError = "";
@@ -97,6 +115,15 @@ public final class BrowserManager {
             if ("browser.inspect".equals(name)) return inspect(args);
             if ("browser.click".equals(name)) return click(args);
             if ("browser.input".equals(name)) return input(args);
+            if ("browser.search_element".equals(name)) return searchElement(args);
+            if ("browser.get_element".equals(name)) return getElement(args);
+            if ("browser.input_text".equals(name)) return inputText(args);
+            if ("browser.input_files".equals(name)) return inputFiles(args);
+            if ("browser.input_option".equals(name)) return inputOption(args);
+            if ("browser.click_at".equals(name)) return clickAt(args);
+            if ("browser.map_coordinates".equals(name)) return mapCoordinates(args);
+            if ("browser.wait_for".equals(name)) return waitFor(args);
+            if ("browser.press_key".equals(name)) return pressKey(args);
             if ("browser.scroll".equals(name)) return scroll(args);
             if ("browser.source".equals(name)) return source(args);
             if ("browser.screenshot".equals(name)) return screenshot(args);
@@ -107,6 +134,7 @@ public final class BrowserManager {
             if ("browser.set_mode".equals(name)) return setMode(args);
             if ("browser.set_viewport".equals(name)) return setViewport(args);
             if ("browser.item.list".equals(name)) return listItems(args);
+            if ("browser.network".equals(name)) return network(args);
             if ("browser.get.item".equals(name)) return getItem(args);
             if ("browser.debug.console".equals(name)) return console(args);
         }
@@ -292,13 +320,105 @@ public final class BrowserManager {
     private JSONObject source(JSONObject args) throws Exception {
         ensureExistingPage();
         String mode = args.optString("mode", "html").toLowerCase(Locale.US);
-        if (!"html".equals(mode) && !"text".equals(mode)) throw new IllegalArgumentException("mode harus html atau text.");
-        int maxChars = clamp(args.optInt("maxChars", 20000), 100, MAX_SOURCE_CHARS);
-        String expression = "html".equals(mode) ?
-                "(document.documentElement?document.documentElement.outerHTML:'')" :
-                "(document.body?document.body.innerText:'')";
-        String js = "(function(){var s=String(" + expression + ");var full=s.length;var max=" + maxChars + ";return JSON.stringify({url:location.href,title:document.title,mode:" + JSONObject.quote(mode) + ",length:full,truncated:full>max,source:s.slice(0,max)});})()";
-        return evalObject(js, 20000L);
+        boolean full = args.optBoolean("full", false) || "full".equals(mode);
+        if (!"html".equals(mode) && !"text".equals(mode) && !"full".equals(mode)) throw new IllegalArgumentException("mode harus html, text, atau full.");
+        String expression = ("text".equals(mode)) ? "(document.body?document.body.innerText:'')" : "(document.documentElement?document.documentElement.outerHTML:'')";
+        String limitExpression = args.has("maxChars") && !full ? "Math.max(0," + Math.max(0,args.optInt("maxChars",0)) + ")" : "s.length";
+        String js = "(function(){try{var s=String(" + expression + ");var total=s.length;var max=" + limitExpression + ";var out=s.slice(0,max);return JSON.stringify({ok:true,url:location.href,title:document.title,mode:" + JSONObject.quote(mode) + ",length:total,returnedChars:out.length,truncated:out.length<total,full:out.length===total,source:out,next_actions:out.length<total?['browser.source with a larger maxChars','browser.source with full=true']:[]});}catch(e){return JSON.stringify({ok:false,error:String(e),warnings:[],data:null,next_actions:[]});}})()";
+        return evalObject(js, 30000L);
+    }
+
+    private JSONObject searchElement(JSONObject args) throws Exception {
+        ensureExistingPage();
+        String text = args.optString("text", "");
+        String pattern = args.optString("pattern", "");
+        if (text.length()==0 && pattern.length()==0) throw new IllegalArgumentException("Isi text atau pattern untuk mencari elemen.");
+        int limit=clamp(args.optInt("limit",20),1,100);
+        String js="(function(){try{var q="+JSONObject.quote(text)+",p="+JSONObject.quote(pattern)+",all=document.querySelectorAll('body *'),out=[];var re=null;if(p){try{re=new RegExp(p,'i')}catch(x){return JSON.stringify({success:false,error:'Regex tidak valid: '+x,warnings:[],data:[],next_actions:['Perbaiki parameter pattern atau gunakan text']})}}function norm(s){return String(s||'').replace(/\\s+/g,' ').trim()}function selector(e){if(e.id)return '#'+e.id;var a=e.tagName.toLowerCase();if(e.className&&typeof e.className==='string')a+='.'+e.className.trim().split(/\\s+/).slice(0,3).join('.');return a}for(var i=0;i<all.length&&out.length<"+limit+";i++){var e=all[i],t=norm(e.innerText||e.textContent),hit=re?re.test(t):t.toLowerCase().indexOf(q.toLowerCase())>=0;if(!hit||!t)continue;var r=e.getBoundingClientRect(),st=getComputedStyle(e),vis=!!(r.width&&r.height&&st.display!=='none'&&st.visibility!=='hidden'),tag=e.tagName.toLowerCase(),inter= /^(a|button|input|textarea|select)$/.test(tag)||e.hasAttribute('onclick')||e.getAttribute('role')==='button';var score=(t.toLowerCase()===q.toLowerCase()?1:(t.toLowerCase().indexOf(q.toLowerCase())===0?.9:.65));out.push({selector:selector(e),id:e.id||'',className:typeof e.className==='string'?e.className:'',tag:tag,text:t.slice(0,500),parent:e.parentElement?{tag:e.parentElement.tagName.toLowerCase(),id:e.parentElement.id||'',text:norm(e.parentElement.innerText).slice(0,180)}:null,children:Array.prototype.slice.call(e.children,0,8).map(function(c){return {tag:c.tagName.toLowerCase(),id:c.id||'',text:norm(c.innerText||c.textContent).slice(0,100)}}),coordinates:{x:r.left,y:r.top,width:r.width,height:r.height,centerX:r.left+r.width/2,centerY:r.top+r.height/2,pageX:r.left+window.scrollX,pageY:r.top+window.scrollY},visible:vis,interactable:inter&&!e.disabled,confidence:score})}return JSON.stringify({success:out.length>0,error:out.length?'':('Tidak ada elemen yang cocok dengan '+(q||p)),warnings:[],data:out,next_actions:out.length?['Gunakan selector dari kandidat terpilih pada browser.get_element atau tool interaksi']:['Perluas sample teks, coba pattern yang lebih longgar, jalankan browser.source, atau browser.inspect']})}catch(e){return JSON.stringify({success:false,error:String(e),warnings:[],data:[],next_actions:[]})}})()";
+        return evalObject(js,20000L);
+    }
+
+    private JSONObject getElement(JSONObject args) throws Exception {
+        ensureExistingPage();
+        String ref=args.optString("elementRef","").trim(),sel=args.optString("selector","").trim(),id=args.optString("id","").trim(),cls=args.optString("className","").trim(),txt=args.optString("text","").trim();
+        String find=ref.length()>0?"(window.__phoneMcpRefs&&window.__phoneMcpRefs["+parseRef(ref)+"])":sel.length()>0?"document.querySelector("+JSONObject.quote(sel)+")":id.length()>0?"document.getElementById("+JSONObject.quote(id)+")":cls.length()>0?"document.getElementsByClassName("+JSONObject.quote(cls)+")[0]": "(function(){var a=document.querySelectorAll('body *');for(var i=0;i<a.length;i++){if(String(a[i].innerText||a[i].textContent||'').replace(/\\s+/g,' ').trim().indexOf("+JSONObject.quote(txt)+")>=0)return a[i]}return null})()";
+        String js="(function(){try{var e="+find+";if(!e)return JSON.stringify({success:false,error:'Elemen tidak ditemukan',warnings:[],data:null,next_actions:['Coba browser.search_element atau periksa selector']});var r=e.getBoundingClientRect(),s=getComputedStyle(e),a={};for(var i=0;i<e.attributes.length;i++)a[e.attributes[i].name]=e.attributes[i].value;var t=e.tagName.toLowerCase(),v=!!(r.width&&r.height&&s.display!=='none'&&s.visibility!=='hidden');return JSON.stringify({success:true,error:null,warnings:[],data:{tag:t,id:e.id||'',className:typeof e.className==='string'?e.className:'',attributes:a,text:String(e.innerText||e.textContent||'').replace(/\\s+/g,' ').trim(),coordinates:{x:r.left,y:r.top,width:r.width,height:r.height,centerX:r.left+r.width/2,centerY:r.top+r.height/2,pageX:r.left+scrollX,pageY:r.top+scrollY},parent:e.parentElement?{tag:e.parentElement.tagName.toLowerCase(),id:e.parentElement.id||'',text:String(e.parentElement.innerText||'').slice(0,300)}:null,children:Array.prototype.slice.call(e.children,0,30).map(function(c){return {tag:c.tagName.toLowerCase(),id:c.id||'',className:typeof c.className==='string'?c.className:'',text:String(c.innerText||c.textContent||'').replace(/\\s+/g,' ').trim().slice(0,200)}}),visible:v,interactable:(/^(a|button|input|textarea|select)$/.test(t)||e.hasAttribute('onclick')||e.getAttribute('role')==='button')&&!e.disabled,enabled:!e.disabled,disabled:!!e.disabled,readOnly:!!e.readOnly,computedStyle:{display:s.display,visibility:s.visibility,position:s.position,zIndex:s.zIndex,color:s.color,backgroundColor:s.backgroundColor,fontSize:s.fontSize,fontWeight:s.fontWeight,width:s.width,height:s.height,opacity:s.opacity}},next_actions:[]})}catch(x){return JSON.stringify({success:false,error:String(x),warnings:[],data:null,next_actions:[]})}})()";
+        return evalObject(js,20000L);
+    }
+
+    private int parseRef(String ref) { if(!ref.matches("e[0-9]{1,4}")) throw new IllegalArgumentException("elementRef harus seperti e0 atau e12"); return Integer.parseInt(ref.substring(1)); }
+
+    private JSONObject inputText(JSONObject args) throws Exception {
+        JSONObject a=new JSONObject(args.toString());
+        if(!a.has("value")&&a.has("text"))a.put("value",a.optString("text",""));
+        String sel=a.optString("selector","");
+        if(sel.length()==0&&a.optString("target","").length()>0)a.put("selector",a.optString("target"));
+        JSONObject r=input(a);
+        if("file".equalsIgnoreCase(r.optString("type",""))) throw new IllegalArgumentException("browser.input_text hanya untuk teks; gunakan browser.input_files untuk input type=file.");
+        return contract(r);
+    }
+
+    private JSONObject inputFiles(JSONObject args) throws Exception {
+        ensureExistingPage();
+        JSONArray specs=args.optJSONArray("files");
+        if(specs==null){specs=new JSONArray();specs.put(new JSONObject(args.toString()));}
+        if(specs.length()<1)throw new IllegalArgumentException("files harus berisi minimal satu file.");
+        if(specs.length()>20)throw new IllegalArgumentException("Maksimal 20 file dalam satu panggilan.");
+        File dir=new File(context.getCacheDir(),"mcp_input_files");if(!dir.exists()&&!dir.mkdirs())throw new IllegalStateException("Gagal membuat direktori file sementara.");
+        JSONArray metadata=new JSONArray();Uri[] uris=new Uri[specs.length()];
+        for(int i=0;i<specs.length();i++){
+            JSONObject spec=specs.optJSONObject(i);if(spec==null)throw new IllegalArgumentException("files["+i+"] harus object.");
+            String sourceType=spec.optString("sourceType",args.optString("sourceType","")).toLowerCase(Locale.US);
+            String filename=spec.optString("filename",specs.length()==1?args.optString("filename","upload.bin"):"upload_"+(i+1)+".bin");
+            if(filename.length()==0||filename.indexOf("/")>=0||filename.indexOf("\\")>=0||"..".equals(filename))throw new IllegalArgumentException("filename harus nama file saja, tanpa path.");
+            byte[] bytes;
+            if("content".equals(sourceType))bytes=spec.optString("content",args.optString("content","")).getBytes("UTF-8");
+            else if("base64".equals(sourceType)){String encoded=spec.optString("base64",args.optString("base64",""));int comma=encoded.indexOf(",");if(encoded.startsWith("data:")&&comma>=0)encoded=encoded.substring(comma+1);bytes=Base64.decode(encoded,Base64.DEFAULT);}
+            else if("path".equals(sourceType)){String path=spec.optString("path",args.optString("path",""));if(path.length()==0)throw new IllegalArgumentException("path wajib untuk sourceType=path");File f=new File(path);if(!f.isFile())throw new IllegalArgumentException("File path tidak ditemukan atau bukan file: "+path);bytes=readFileBytes(f);if(filename.equals("upload.bin"))filename=f.getName();}
+            else if("url".equals(sourceType)){String sourceUrl=spec.optString("url",args.optString("url",""));if(!isHttpUrl(sourceUrl))throw new IllegalArgumentException("url harus HTTP/HTTPS");HttpURLConnection c=(HttpURLConnection)new URL(sourceUrl).openConnection();int timeout=clamp(args.optInt("timeout",15000),1000,60000);c.setConnectTimeout(timeout);c.setReadTimeout(timeout);c.setInstanceFollowRedirects(true);try{int code=c.getResponseCode();if(code<200||code>=300)throw new IllegalStateException("Download sumber file gagal, HTTP "+code);InputStream in=c.getInputStream();ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] buf=new byte[8192];int n;while((n=in.read(buf))!=-1){out.write(buf,0,n);if(out.size()>20000000)throw new IllegalArgumentException("File melebihi 20 MB");}bytes=out.toByteArray();}finally{c.disconnect();}}
+            else throw new IllegalArgumentException("sourceType harus path, url, base64, atau content.");
+            if(bytes.length>20000000)throw new IllegalArgumentException("File melebihi 20 MB: "+filename);
+            File outFile=File.createTempFile("mcp_","_"+filename,dir);FileOutputStream fos=new FileOutputStream(outFile);try{fos.write(bytes);fos.flush();}finally{fos.close();}
+            uris[i]=Uri.parse("content://rh.browser.models.files/"+outFile.getName());metadata.put(new JSONObject().put("filename",filename).put("bytes",bytes.length).put("mime",spec.optString("mime",args.optString("mime","application/octet-stream"))));
+        }
+        final String sel=args.optString("selector","").trim(),id=args.optString("id","").trim(),name=args.optString("name","").trim(),ref=args.optString("elementRef","").trim();
+        String find=ref.length()>0?"(window.__phoneMcpRefs&&window.__phoneMcpRefs["+parseRef(ref)+"])":sel.length()>0?"document.querySelector("+JSONObject.quote(sel)+")":id.length()>0?"document.getElementById("+JSONObject.quote(id)+")":name.length()>0?"document.querySelector('input[type=file][name='+CSS.escape("+JSONObject.quote(name)+")+']')":"document.querySelector('input[type=file]')";
+        final boolean multi=args.optBoolean("multiple",false)||uris.length>1;pendingFileUris=uris;
+        String js="(function(){try{var e="+find+";if(!e||String(e.type).toLowerCase()!=='file')return JSON.stringify({success:false,error:'Target tidak ditemukan atau bukan input type=file',warnings:[],data:null,next_actions:['Gunakan browser.search_element untuk menemukan input file']});if(e.disabled)return JSON.stringify({success:false,error:'Input file disabled',warnings:[],data:null,next_actions:[]});if("+multi+"&&!e.multiple)return JSON.stringify({success:false,error:'Input tidak memiliki atribut multiple',warnings:[],data:{multiple:false},next_actions:['Pilih satu file atau gunakan input file yang mendukung multiple']});e.click();return JSON.stringify({success:true,error:null,warnings:['File disalurkan melalui callback native WebView; situs masih dapat menolak tipe atau ukuran file.'],data:{tag:'input',type:'file',multiple:e.multiple,fileCount:"+uris.length+"},next_actions:[]})}catch(x){return JSON.stringify({success:false,error:String(x),warnings:[],data:null,next_actions:[]})}})()";
+        JSONObject result=contract(evalObject(js,clamp(args.optInt("timeout",15000),1000,60000)));if(!result.optBoolean("success"))pendingFileUris=null;else result.put("files",metadata);return result;
+    }
+
+    private byte[] readFileBytes(File file) throws Exception { if(file.length()>20000000L)throw new IllegalArgumentException("File melebihi 20 MB");FileInputStream in=new FileInputStream(file);ByteArrayOutputStream out=new ByteArrayOutputStream();try{byte[] b=new byte[8192];int n;while((n=in.read(b))!=-1)out.write(b,0,n);}finally{in.close();}return out.toByteArray(); }
+
+
+    private JSONObject inputOption(JSONObject args) throws Exception {
+        ensureExistingPage();String sel=args.optString("selector","").trim(),target=args.optString("target","").trim();if(sel.length()==0)sel=target;
+        String value=args.optString("value",""),label=args.optString("label",""),text=args.optString("text",""),ref=args.optString("elementRef","");int index=args.optInt("index",-1);
+        String find=ref.length()>0?"(window.__phoneMcpRefs&&window.__phoneMcpRefs["+parseRef(ref)+"])":sel.length()>0?"document.querySelector("+JSONObject.quote(sel)+")":"null";
+        String js="(function(){try{var e="+find+";if(!e)return JSON.stringify({success:false,error:'Target tidak ditemukan; berikan selector atau elementRef',warnings:[],data:null,next_actions:['Gunakan browser.search_element untuk menemukan dropdown/radio']});var tag=e.tagName.toLowerCase();if(tag==='select'){var opts=e.options,chosen=-1;for(var i=0;i<opts.length;i++){if(("+index+">=0&&i==="+index+")||("+JSONObject.quote(value)+"!==''&&opts[i].value==="+JSONObject.quote(value)+")||("+JSONObject.quote((label.length()>0?label:text))+"!==''&&(opts[i].text||'').trim()==="+JSONObject.quote((label.length()>0?label:text))+")){chosen=i;break}}if(chosen<0)return JSON.stringify({success:false,error:'Option tidak ditemukan',warnings:[],data:{optionCount:opts.length},next_actions:['Ambil opsi yang tersedia dengan browser.get_element']});e.selectedIndex=chosen;e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return JSON.stringify({success:true,error:null,warnings:[],data:{tag:tag,index:chosen,value:opts[chosen].value,label:opts[chosen].text,selected:true},next_actions:[]})}var q="+JSONObject.quote((label.length()>0?label:text))+",items=[];if(tag==='input'&&e.type==='radio'){items=[e].concat(Array.prototype.slice.call(document.querySelectorAll('input[type=radio]')))}else{var root=e.closest('[role=combobox],[role=listbox],[role=menu],select')||e.parentElement||document;items=Array.prototype.slice.call(root.querySelectorAll('[role=option],[role=radio],option,button,[role=menuitem],li,[data-value]'))}var hit=null;for(var j=0;j<items.length;j++){var x=items[j],tx=String(x.innerText||x.textContent||'').replace(/\\s+/g,' ').trim();if(("+JSONObject.quote(value)+"!==''&&(x.value==="+JSONObject.quote(value)+"||x.getAttribute('data-value')==="+JSONObject.quote(value)+"))||(q!==''&&tx===q)){hit=x;break}}if(!hit&&"+index+">=0&&items["+index+"])hit=items["+index+"];if(!hit)return JSON.stringify({success:false,error:'Item custom dropdown tidak ditemukan',warnings:[],data:{candidateCount:items.length},next_actions:['Klik untuk membuka dropdown dahulu, lalu coba visible text yang persis']});hit.click();if(hit.type==='radio')hit.checked=true;return JSON.stringify({success:true,error:null,warnings:['Custom dropdown ditangani secara heuristic; situs dapat memerlukan urutan klik khusus.'],data:{tag:hit.tagName.toLowerCase(),text:String(hit.innerText||hit.textContent||'').trim(),value:hit.value||hit.getAttribute('data-value')||'',selected:true},next_actions:[]})}catch(x){return JSON.stringify({success:false,error:String(x),warnings:[],data:null,next_actions:[]})}})()";
+        return contract(evalObject(js,20000L));
+    }
+
+    private JSONObject clickAt(JSONObject args) throws Exception {
+        ensureExistingPage();double x=args.optDouble("x",Double.NaN),y=args.optDouble("y",Double.NaN);if(Double.isNaN(x)||Double.isNaN(y))throw new IllegalArgumentException("x dan y wajib berupa angka");String space=args.optString("coordinateSpace","viewport");String rel=args.optString("relativeTo","");String js="(function(){try{var x="+x+",y="+y+",space="+JSONObject.quote(space)+",base=null;"+(rel.length()>0?"base=document.querySelector("+JSONObject.quote(rel)+");if(!base)return JSON.stringify({success:false,error:'relativeTo selector tidak ditemukan',warnings:[],data:null,next_actions:[]});var br=base.getBoundingClientRect();x+=br.left;y+=br.top;":"")+"if(space==='page'){x-=window.scrollX;y-=window.scrollY}else if(space!=='viewport'&&space!=='relative')return JSON.stringify({success:false,error:'coordinateSpace harus viewport, page, atau relative',warnings:[],data:null,next_actions:[]});var e=document.elementFromPoint(x,y);if(!e)return JSON.stringify({success:false,error:'Tidak ada elemen pada koordinat tersebut',warnings:[],data:{x:x,y:y},next_actions:['Gunakan browser.map_coordinates untuk melihat grid']});var ev=document.createEvent('MouseEvents');ev.initMouseEvent('click',true,true,window,1,x,y,x,y,false,false,false,false,0,null);e.dispatchEvent(ev);return JSON.stringify({success:true,error:null,warnings:['Klik DOM sintetis tidak selalu equivalen dengan input sentuh native dan dapat ditolak situs.'],data:{x:x,y:y,coordinateSpace:space,hitTag:e.tagName.toLowerCase(),id:e.id||'',className:typeof e.className==='string'?e.className:'',text:String(e.innerText||e.textContent||'').replace(/\\s+/g,' ').trim().slice(0,200),url:location.href},next_actions:[]})}catch(e){return JSON.stringify({success:false,error:String(e),warnings:[],data:null,next_actions:[]})}})()";return contract(evalObject(js,20000L));
+    }
+
+    private JSONObject mapCoordinates(JSONObject args) throws Exception {
+        ensureExistingPage();int cell=clamp(args.optInt("cellSize",80),30,250);boolean labels=args.optBoolean("labels",true);String js="(function(){var old=document.getElementById('__rh_coord_grid');if(old)old.remove();var d=document.createElement('div');d.id='__rh_coord_grid';d.style='position:fixed;inset:0;z-index:2147483647;pointer-events:none;background-image:linear-gradient(to right,rgba(255,0,0,.65) 1px,transparent 1px),linear-gradient(to bottom,rgba(255,0,0,.65) 1px,transparent 1px);background-size:"+cell+"px "+cell+"px';"+(labels?"for(var y=0;y<innerHeight;y+="+cell+"){for(var x=0;x<innerWidth;x+="+cell+"){var l=document.createElement('span');l.textContent=x+','+y;l.style='position:absolute;left:'+x+'px;top:'+y+'px;background:#fff;color:#b00000;font:11px monospace;padding:1px 2px';d.appendChild(l)}}":"")+"document.documentElement.appendChild(d);return JSON.stringify({success:true,data:{cellSize:"+cell+",viewportWidth:innerWidth,viewportHeight:innerHeight,coordinateSpace:'viewport'},warnings:[],next_actions:['Gunakan titik viewport dari grid pada browser.click_at'],error:null})})()";JSONObject result=contract(evalObject(js,10000L));JSONObject shot=screenshot(new JSONObject());String cleanup="(function(){var e=document.getElementById('__rh_coord_grid');if(e)e.remove();return true})()";try{evaluateJavascript(cleanup,5000L);}catch(Exception ignored){}shot.put("grid",result.optJSONObject("data"));shot.put("note","Gambar screenshot memuat grid koordinat viewport; gunakan koordinat label sebagai x,y untuk browser.click_at.");return shot;
+    }
+
+    private JSONObject waitFor(JSONObject args) throws Exception {
+        ensureExistingPage();String condition=args.optString("condition","").toLowerCase(Locale.US),sel=args.optString("selector",""),text=args.optString("text",""),url=args.optString("url",""),expr=args.optString("expression","true");int timeout=clamp(args.optInt("timeout",10000),0,120000),interval=clamp(args.optInt("interval",250),50,2000);long started=System.currentTimeMillis();boolean ok=false;String last="";
+        while(System.currentTimeMillis()-started<=timeout){String test;if("element".equals(condition))test="!!document.querySelector("+JSONObject.quote(sel)+")";else if("element_hidden".equals(condition))test="!document.querySelector("+JSONObject.quote(sel)+")||!document.querySelector("+JSONObject.quote(sel)+").getClientRects().length";else if("text".equals(condition))test="String(document.body?document.body.innerText:'').indexOf("+JSONObject.quote(text)+")>=0";else if("url".equals(condition))test="location.href.indexOf("+JSONObject.quote(url)+")>=0";else if("page_load".equals(condition))test="document.readyState==='complete'";else if("network_idle".equals(condition))test="true";else if("custom".equals(condition))test="!!("+expr+")";else throw new IllegalArgumentException("condition harus element, text, url, page_load, element_hidden, network_idle, atau custom.");JSONObject state=evalObject("(function(){try{return JSON.stringify({ok:!!("+test+"),url:location.href,readyState:document.readyState})}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()",5000L);last=state.optString("error","");if(state.optBoolean("ok")){ok=true;break;}if("network_idle".equals(condition)){if(System.currentTimeMillis()-started>=Math.min(timeout,1000)){ok=true;break;}}if(timeout==0)break;Thread.sleep(interval);}
+        JSONObject out=new JSONObject();out.put("success",ok);out.put("error",ok?JSONObject.NULL:"timeout");out.put("warnings",new JSONArray());out.put("data",new JSONObject().put("condition",condition).put("elapsedMs",System.currentTimeMillis()-started).put("timeoutMs",timeout).put("url",getActiveUrl()).put("lastError",last));out.put("next_actions",ok?new JSONArray():new JSONArray().put("Periksa selector/kondisi, tingkatkan timeout, atau jalankan browser.inspect"));return out;
+    }
+
+    private JSONObject pressKey(JSONObject args) throws Exception {
+        ensureExistingPage();String key=args.optString("key","").trim().toLowerCase(Locale.US),sel=args.optString("selector","").trim();if(key.length()==0)throw new IllegalArgumentException("key wajib diisi");String target=sel.length()>0?"document.querySelector("+JSONObject.quote(sel)+")":"(document.activeElement||document.body)";String[] keys=key.split("\\+");String k=keys[keys.length-1];String js="(function(){try{var e="+target+";if(!e)return JSON.stringify({success:false,error:'Target tidak ditemukan',warnings:[],data:null,next_actions:[]});e.focus();var k="+JSONObject.quote(k)+",map={enter:'Enter',tab:'Tab',escape:'Escape',esc:'Escape',backspace:'Backspace',delete:'Delete',arrowup:'ArrowUp',arrowdown:'ArrowDown',arrowleft:'ArrowLeft',arrowright:'ArrowRight',space:' ',home:'Home',end:'End'};k=map[k]||("+JSONObject.quote(k)+".length===1?"+JSONObject.quote(k)+":"+JSONObject.quote(k)+");var opt={key:k,code:k, bubbles:true,cancelable:true,ctrlKey:"+args.optBoolean("ctrl",key.indexOf("ctrl+")>=0)+",altKey:"+args.optBoolean("alt",key.indexOf("alt+")>=0)+",shiftKey:"+args.optBoolean("shift",key.indexOf("shift+")>=0)+",metaKey:"+args.optBoolean("meta",key.indexOf("meta+")>=0)+"};e.dispatchEvent(new KeyboardEvent('keydown',opt));e.dispatchEvent(new KeyboardEvent('keypress',opt));e.dispatchEvent(new KeyboardEvent('keyup',opt));if(k==='Enter'&&e.form&&/^(INPUT|TEXTAREA)$/.test(e.tagName)&&e.tagName==='INPUT'){}return JSON.stringify({success:true,error:null,warnings:['KeyboardEvent sintetis tidak memicu semua perilaku keyboard native; ctrl+c/v mungkin dibatasi WebView.'],data:{key:k,target:e.tagName.toLowerCase(),id:e.id||'',valueLength:typeof e.value==='string'?e.value.length:null},next_actions:[]})}catch(x){return JSON.stringify({success:false,error:String(x),warnings:[],data:null,next_actions:[]})}})()";return contract(evalObject(js,15000L));
+    }
+
+    private JSONObject contract(JSONObject raw) throws Exception {
+        if(raw.has("success"))return raw;JSONObject out=new JSONObject();boolean ok=raw.optBoolean("ok",!raw.has("error"));out.put("success",ok);out.put("error",raw.has("error")?raw.opt("error"):JSONObject.NULL);out.put("warnings",new JSONArray());out.put("data",raw);out.put("next_actions",new JSONArray());return out;
     }
 
     private JSONObject screenshot(JSONObject args) throws Exception {
@@ -435,6 +555,342 @@ public final class BrowserManager {
         result.put("reloadFinished", reloadFinished);
         result.put("note", "Ukuran dibatasi 320-1280 CSS px untuk lebar dan 240-1000 CSS px untuk tinggi. Screenshot menangkap viewport ini saja; konten di luarnya tetap perlu di-scroll.");
         return result;
+    }
+
+    private JSONObject network(JSONObject args) throws Exception {
+        try {
+            return networkInternal(args);
+        } catch (Exception e) {
+            JSONObject out = new JSONObject();
+            out.put("success", false);
+            out.put("error", e.getMessage() == null ? e.toString() : e.getMessage());
+            out.put("warnings", new JSONArray());
+            out.put("data", JSONObject.NULL);
+            JSONArray next = new JSONArray();
+            next.put("Pastikan halaman HTTP/HTTPS sudah dibuka dengan browser.open dan periksa parameter filter.");
+            out.put("next_actions", next);
+            return out;
+        }
+    }
+
+    private JSONObject networkInternal(JSONObject args) throws Exception {
+        ensureExistingPage();
+        JSONArray warnings = new JSONArray();
+        String instrumentationError = "";
+        String pageTitle = "";
+        try {
+            evalObject(networkInstrumentationScript(), 8000L);
+            JSONObject snapshot = evalObject(networkSnapshotScript(), 12000L);
+            if (snapshot.has("error")) instrumentationError = snapshot.optString("error", "");
+            pageTitle = snapshot.optString("title", "");
+            mergeNetworkSnapshot(snapshot);
+        } catch (Exception e) {
+            instrumentationError = e.getMessage() == null ? e.toString() : e.getMessage();
+        }
+
+        String domainFilter = args.optString("domain", "").trim().toLowerCase(Locale.US);
+        String urlFilter = args.optString("url", "").trim().toLowerCase(Locale.US);
+        String methodFilter = args.optString("method", "").trim();
+        String typeFilter = args.optString("type", "").trim();
+        String statusFilter = args.optString("status", "").trim();
+        String sourceFilter = args.optString("source", "").trim().toLowerCase(Locale.US);
+        boolean filterSuccess = args.has("success") && !args.isNull("success");
+        boolean successValue = args.optBoolean("success", false);
+        long minDuration = args.has("minDuration") ? args.optLong("minDuration", -1L) : -1L;
+        long maxDuration = args.has("maxDuration") ? args.optLong("maxDuration", -1L) : -1L;
+        int offset = Math.max(0, args.optInt("offset", 0));
+        boolean hasLimit = args.has("limit") && !args.isNull("limit");
+        int limit = hasLimit ? clamp(args.optInt("limit", 100), 1, MAX_NETWORK_ITEMS) : Integer.MAX_VALUE;
+        if (minDuration < -1L || maxDuration < -1L) throw new IllegalArgumentException("minDuration/maxDuration harus bernilai 0 atau lebih.");
+        if (minDuration >= 0L && maxDuration >= 0L && minDuration > maxDuration) throw new IllegalArgumentException("minDuration tidak boleh lebih besar dari maxDuration.");
+
+        JSONArray matched = new JSONArray();
+        int totalTracked;
+        long dropped;
+        long scriptDropped;
+        synchronized (networkLock) {
+            totalTracked = networkItems.size();
+            dropped = networkDropped;
+            scriptDropped = networkScriptDropped;
+            for (int i = 0; i < networkItems.size(); i++) {
+                NetworkEntry e = networkItems.get(i);
+                if (!matchesNetworkFilter(e, domainFilter, urlFilter, methodFilter, typeFilter, statusFilter, sourceFilter, filterSuccess, successValue, minDuration, maxDuration)) continue;
+                matched.put(networkEntryJson(e));
+            }
+        }
+        JSONArray output = new JSONArray();
+        int returned = 0;
+        for (int i = offset; i < matched.length() && returned < limit; i++) {
+            output.put(matched.get(i));
+            returned++;
+        }
+        boolean hasMore = ((long) offset + (long) returned) < (long) matched.length();
+        if (instrumentationError.length() > 0) warnings.put("Instrumentasi JavaScript tidak berhasil dibaca: " + instrumentationError);
+        warnings.put("Observasi menggabungkan WebViewClient, fetch/XHR yang terinstrumentasi, dan Resource Timing. WebViewClient tidak menyediakan status/durasi/header respons untuk semua respons sukses; kolom yang tidak tersedia ditandai null.");
+        warnings.put("Instrumentasi fetch/XHR dipasang setelah onPageFinished. Request JavaScript yang selesai sebelum pemasangan bisa hanya terlihat sebagai resource timing atau bisa tidak terdeteksi.");
+        warnings.put("Header sensitif seperti cookie, authorization, proxy-authorization, dan set-cookie tidak dikembalikan.");
+        warnings.put("WebSocket dan EventSource tidak direkam sebagai siklus koneksi lengkap. Durasi fetch bisa mencerminkan waktu sampai response headers jika Resource Timing tidak menyediakan durasi transfer; sizeBytes adalah estimasi dari Resource Timing dan bisa tidak tersedia.");
+        if (dropped > 0L) warnings.put("Penyimpanan native membuang " + dropped + " entri terlama karena melewati kapasitas " + MAX_NETWORK_ITEMS + ". Gunakan filter atau ambil data lebih sering.");
+        if (scriptDropped > 0L) warnings.put("Instrumentasi halaman membuang " + scriptDropped + " event JavaScript terlama karena melewati kapasitas internalnya.");
+        if (matched.length() == 0) warnings.put("Tidak ada request yang cocok dengan filter saat ini.");
+
+        JSONObject data = new JSONObject();
+        data.put("url", getActiveUrl());
+        data.put("title", pageTitle);
+        data.put("totalTracked", totalTracked);
+        data.put("totalMatching", matched.length());
+        data.put("returned", output.length());
+        data.put("offset", offset);
+        data.put("hasMore", hasMore);
+        data.put("droppedNativeEntries", dropped);
+        data.put("droppedJavascriptEvents", scriptDropped);
+        data.put("requests", output);
+        JSONObject result = new JSONObject();
+        result.put("success", true);
+        result.put("error", JSONObject.NULL);
+        result.put("warnings", warnings);
+        result.put("data", data);
+        JSONArray next = new JSONArray();
+        if (hasMore) next.put("Ambil halaman berikutnya dengan offset=" + (offset + returned) + " dan filter yang sama.");
+        if (matched.length() == 0) next.put("Coba hapus filter, buka ulang halaman, atau picu interaksi yang menghasilkan request lalu panggil browser.network lagi.");
+        next.put("Gunakan browser.network dengan domain, method, type, status, success, minDuration, atau maxDuration untuk memfilter hasil.");
+        result.put("next_actions", next);
+        return result;
+    }
+
+    private boolean matchesNetworkFilter(NetworkEntry e, String domain, String url, String methods, String types,
+                                        String statuses, String source, boolean filterSuccess, boolean successValue,
+                                        long minDuration, long maxDuration) {
+        if (domain.length() > 0) {
+            String host = Uri.parse(e.url).getHost();
+            if (host == null) return false;
+            host = host.toLowerCase(Locale.US);
+            if (!(host.equals(domain) || host.endsWith("." + domain))) return false;
+        }
+        if (url.length() > 0 && e.url.toLowerCase(Locale.US).indexOf(url) < 0) return false;
+        if (!matchesCsv(methods, e.method, true)) return false;
+        if (!matchesCsv(types, e.type, false)) return false;
+        if (!matchesCsv(statuses, e.statusCode > 0 ? String.valueOf(e.statusCode) : "unknown", false)) return false;
+        if (source.length() > 0 && e.source.toLowerCase(Locale.US).indexOf(source) < 0) return false;
+        if (filterSuccess && (e.success == null || e.success.booleanValue() != successValue)) return false;
+        if (minDuration >= 0L && (e.durationMs < 0L || e.durationMs < minDuration)) return false;
+        if (maxDuration >= 0L && (e.durationMs < 0L || e.durationMs > maxDuration)) return false;
+        return true;
+    }
+
+    private boolean matchesCsv(String filter, String value, boolean upper) {
+        if (filter == null || filter.trim().length() == 0) return true;
+        if (value == null) value = "";
+        String candidate = upper ? value.toUpperCase(Locale.US) : value.toLowerCase(Locale.US);
+        String[] parts = filter.split(",");
+        for (int i = 0; i < parts.length; i++) {
+            String part = parts[i].trim();
+            if (part.length() == 0) continue;
+            if (upper) part = part.toUpperCase(Locale.US); else part = part.toLowerCase(Locale.US);
+            if (candidate.equals(part)) return true;
+        }
+        return false;
+    }
+
+    private JSONObject networkEntryJson(NetworkEntry e) throws Exception {
+        JSONObject row = new JSONObject();
+        row.put("id", e.id);
+        row.put("url", e.url);
+        String host = Uri.parse(e.url).getHost();
+        row.put("domain", host == null ? JSONObject.NULL : host);
+        row.put("method", e.method.length() == 0 ? JSONObject.NULL : e.method);
+        row.put("type", e.type.length() == 0 ? "resource" : e.type);
+        row.put("source", e.source);
+        if (e.startedAt > 0L) row.put("startedAt", Long.valueOf(e.startedAt));
+        else row.put("startedAt", JSONObject.NULL);
+        if (e.durationMs >= 0L) row.put("durationMs", Long.valueOf(e.durationMs));
+        else row.put("durationMs", JSONObject.NULL);
+        if (e.statusCode > 0) row.put("status", Integer.valueOf(e.statusCode));
+        else row.put("status", JSONObject.NULL);
+        row.put("success", e.success == null ? JSONObject.NULL : e.success);
+        row.put("isMainFrame", e.mainFrame);
+        if (e.sizeBytes >= 0L) row.put("sizeBytes", Long.valueOf(e.sizeBytes));
+        else row.put("sizeBytes", JSONObject.NULL);
+        row.put("sizeKnown", e.sizeBytes >= 0L);
+        row.put("initiator", e.initiator.length() == 0 ? JSONObject.NULL : e.initiator);
+        row.put("error", e.error.length() == 0 ? JSONObject.NULL : e.error);
+        row.put("requestHeaders", headersJson(e.requestHeaders));
+        row.put("responseHeaders", headersJson(e.responseHeaders));
+        row.put("responseHeadersAvailable", !e.responseHeaders.isEmpty());
+        return row;
+    }
+
+    private JSONObject headersJson(LinkedHashMap<String, String> headers) throws Exception {
+        JSONObject out = new JSONObject();
+        for (Map.Entry<String, String> h : headers.entrySet()) out.put(h.getKey(), h.getValue());
+        return out;
+    }
+
+    private String networkInstrumentationScript() {
+        return "(function(){try{if(window.__rhNetworkInstalled)return true;window.__rhNetworkInstalled=true;window.__rhNetworkEvents=window.__rhNetworkEvents||[];window.__rhNetworkDropped=window.__rhNetworkDropped||0;window.__rhNetworkTimeOrigin=window.__rhNetworkTimeOrigin||((window.performance&&performance.timeOrigin)?performance.timeOrigin:(Date.now()-((window.performance&&performance.now)?performance.now():0)));" +
+            "function safeUrl(u){try{return new URL(String(u),location.href).href}catch(e){return String(u||'')}}" +
+            "function headerObject(h){var o={},n=0;try{if(!h)return o;if(typeof h.forEach==='function'){h.forEach(function(v,k){if(n++<50)o[String(k).toLowerCase()]=String(v).slice(0,2048)})}else if(Array.isArray(h)){for(var i=0;i<h.length&&n<50;i++){if(h[i]&&h[i].length>1)o[String(h[i][0]).toLowerCase()]=String(h[i][1]).slice(0,2048),n++}}else{for(var k in h){if(Object.prototype.hasOwnProperty.call(h,k)&&n++<50)o[String(k).toLowerCase()]=String(h[k]).slice(0,2048)}}}catch(e){}return o}" +
+            "function responseHeaderObject(raw){var o={};String(raw||'').split(/\\r?\\n/).forEach(function(line){var i=line.indexOf(':');if(i>0)o[line.slice(0,i).trim().toLowerCase()]=line.slice(i+1).trim().slice(0,2048)});return o}" +
+            "function push(e){try{e.pageUrl=location.href;e.source='javascript';e.startedAt=e.startedAt||Date.now();if(window.__rhNetworkEvents.length>=1000){window.__rhNetworkEvents.shift();window.__rhNetworkDropped++}window.__rhNetworkEvents.push(e)}catch(x){}}" +
+            "if(window.fetch){var originalFetch=window.fetch;window.fetch=function(input,init){var url=safeUrl(input&&input.url?input.url:input),method=String((init&&init.method)||(input&&input.method)||'GET').toUpperCase(),reqHeaders=headerObject((init&&init.headers)||(input&&input.headers)),wall=Date.now(),start=(window.performance&&performance.now)?performance.now():0;var p;try{p=originalFetch.apply(this,arguments)}catch(e){push({url:url,method:method,type:'fetch',startedAt:wall,durationMs:0,status:null,success:false,error:String(e),requestHeaders:reqHeaders,responseHeaders:{}});throw e}return p.then(function(res){var dur=(window.performance&&performance.now)?Math.max(0,performance.now()-start):Math.max(0,Date.now()-wall),rh={};try{res.headers.forEach(function(v,k){rh[String(k).toLowerCase()]=String(v).slice(0,2048)})}catch(e){}push({url:url,method:method,type:'fetch',startedAt:wall,durationMs:dur,status:res.status,success:!!res.ok,error:res.ok?'':('HTTP '+res.status),requestHeaders:reqHeaders,responseHeaders:rh,sizeBytes:-1});return res},function(err){var dur=(window.performance&&performance.now)?Math.max(0,performance.now()-start):Math.max(0,Date.now()-wall);push({url:url,method:method,type:'fetch',startedAt:wall,durationMs:dur,status:null,success:false,error:String(err),requestHeaders:reqHeaders,responseHeaders:{}});throw err})}}" +
+            "if(window.XMLHttpRequest){var xo=XMLHttpRequest.prototype.open,xs=XMLHttpRequest.prototype.send,xh=XMLHttpRequest.prototype.setRequestHeader;XMLHttpRequest.prototype.open=function(m,u){this.__rhDone=false;this.__rhN={method:String(m||'GET').toUpperCase(),url:safeUrl(u),headers:{}};return xo.apply(this,arguments)};XMLHttpRequest.prototype.setRequestHeader=function(k,v){try{if(this.__rhN)this.__rhN.headers[String(k).toLowerCase()]=String(v).slice(0,2048)}catch(e){}return xh.apply(this,arguments)};XMLHttpRequest.prototype.send=function(){var xhr=this,meta=this.__rhN||{method:'GET',url:'',headers:{}},wall=Date.now(),start=(window.performance&&performance.now)?performance.now():0;function finish(){if(xhr.__rhDone)return;xhr.__rhDone=true;var dur=(window.performance&&performance.now)?Math.max(0,performance.now()-start):Math.max(0,Date.now()-wall),st=0,rh={};try{st=xhr.status;rh=responseHeaderObject(xhr.getAllResponseHeaders())}catch(e){}push({url:meta.url,method:meta.method,type:'xhr',startedAt:wall,durationMs:dur,status:st||null,success:st>=200&&st<400,error:st===0?'XHR failed or was blocked':(st>=400?'HTTP '+st:''),requestHeaders:meta.headers,responseHeaders:rh,sizeBytes:-1})}try{xhr.addEventListener('loadend',finish)}catch(e){}try{return xs.apply(this,arguments)}catch(e){push({url:meta.url,method:meta.method,type:'xhr',startedAt:wall,durationMs:0,status:null,success:false,error:String(e),requestHeaders:meta.headers,responseHeaders:{}});throw e}}}" +
+            "return true}catch(e){return false}})()";
+    }
+
+    private String networkSnapshotScript() {
+        return "(function(){try{var now=Date.now(),pn=window.performance,perfNow=pn&&pn.now?pn.now():0,origin=window.__rhNetworkTimeOrigin||(now-perfNow),events=(window.__rhNetworkEvents||[]).slice(),timings=[];try{var a=pn&&pn.getEntriesByType?pn.getEntriesByType('resource'):[];for(var i=0;i<a.length;i++){var e=a[i];if(!e||!e.name||!/^https?:/i.test(e.name))continue;timings.push({url:e.name,type:e.initiatorType||'resource',startedAt:Math.max(0,Math.round(origin+e.startTime)),durationMs:Math.max(0,Math.round(e.duration||0)),sizeBytes:(e.transferSize||e.encodedBodySize||0)>0?(e.transferSize||e.encodedBodySize):-1,initiator:e.initiatorType||'',requestStartMs:e.requestStart||0,responseStartMs:e.responseStart||0,responseEndMs:e.responseEnd||0})}}catch(x){}var d=window.__rhNetworkDropped||0;var out=JSON.stringify({url:location.href,title:document.title,events:events,resourceTiming:timings,droppedJavascriptEvents:d});window.__rhNetworkEvents=[];window.__rhNetworkDropped=0;return out}catch(e){return JSON.stringify({error:String(e),events:[],resourceTiming:[],droppedJavascriptEvents:0})}})()";
+    }
+
+    private void mergeNetworkSnapshot(JSONObject snapshot) throws Exception {
+        if (snapshot == null) return;
+        long dropped = snapshot.optLong("droppedJavascriptEvents", 0L);
+        synchronized (networkLock) { networkScriptDropped += dropped; }
+        JSONArray events = snapshot.optJSONArray("events");
+        if (events != null) {
+            for (int i = 0; i < events.length(); i++) {
+                JSONObject event = events.optJSONObject(i);
+                if (event == null) continue;
+                String url = event.optString("url", "");
+                String method = event.optString("method", "UNKNOWN").toUpperCase(Locale.US);
+                String type = event.optString("type", "fetch");
+                long startedAt = event.optLong("startedAt", System.currentTimeMillis());
+                NetworkEntry entry = findOrCreateNetworkEntry(url, method, type, "javascript", startedAt, false, event.optJSONObject("requestHeaders"));
+                if (entry == null) continue;
+                synchronized (networkLock) {
+                    entry.source = appendSource(entry.source, "javascript");
+                    if (type.length() > 0) entry.type = type;
+                    if (event.has("durationMs") && !event.isNull("durationMs")) entry.durationMs = Math.max(0L, event.optLong("durationMs", -1L));
+                    if (event.has("status") && !event.isNull("status")) entry.statusCode = event.optInt("status", -1);
+                    if (event.has("success") && !event.isNull("success")) entry.success = Boolean.valueOf(event.optBoolean("success"));
+                    if (event.has("sizeBytes") && !event.isNull("sizeBytes")) entry.sizeBytes = event.optLong("sizeBytes", -1L);
+                    if (event.has("error")) entry.error = event.optString("error", "");
+                    if (event.has("requestHeaders")) copySafeHeaders(entry.requestHeaders, event.optJSONObject("requestHeaders"));
+                    if (event.has("responseHeaders")) copySafeHeaders(entry.responseHeaders, event.optJSONObject("responseHeaders"));
+                }
+            }
+        }
+        JSONArray timings = snapshot.optJSONArray("resourceTiming");
+        if (timings != null) {
+            for (int i = 0; i < timings.length(); i++) {
+                JSONObject timing = timings.optJSONObject(i);
+                if (timing == null) continue;
+                String url = timing.optString("url", "");
+                long startedAt = timing.optLong("startedAt", System.currentTimeMillis());
+                String type = timing.optString("type", "resource");
+                NetworkEntry entry = findOrCreateNetworkEntry(url, "UNKNOWN", type, "resource_timing", startedAt, false, null);
+                if (entry == null) continue;
+                synchronized (networkLock) {
+                    entry.source = appendSource(entry.source, "resource_timing");
+                    entry.timingStartedAt = startedAt;
+                    if ((entry.type.length() == 0 || "resource".equals(entry.type)) && type.length() > 0) entry.type = type;
+                    long timingDuration = timing.optLong("durationMs", -1L);
+                    if (timingDuration >= 0L && (entry.durationMs < 0L || timingDuration > entry.durationMs)) entry.durationMs = timingDuration;
+                    if (entry.sizeBytes < 0L && timing.optLong("sizeBytes", -1L) > 0L) entry.sizeBytes = timing.optLong("sizeBytes", -1L);
+                    if (entry.initiator.length() == 0) entry.initiator = timing.optString("initiator", "");
+                }
+            }
+        }
+    }
+
+    private NetworkEntry findOrCreateNetworkEntry(String url, String method, String type, String source, long startedAt, boolean mainFrame, JSONObject headers) {
+        if (!isHttpUrl(url) || url.length() > 8192) return null;
+        if (method == null || method.length() == 0) method = "UNKNOWN";
+        if (type == null || type.length() == 0) type = "resource";
+        synchronized (networkLock) {
+            NetworkEntry best = null;
+            long bestDelta = Long.MAX_VALUE;
+            for (int i = networkItems.size() - 1; i >= 0; i--) {
+                NetworkEntry candidate = networkItems.get(i);
+                if (!url.equals(candidate.url)) continue;
+                boolean methodMatch = "UNKNOWN".equals(method) || "UNKNOWN".equals(candidate.method) || method.equalsIgnoreCase(candidate.method);
+                if (!methodMatch) continue;
+                long delta = Math.abs(candidate.startedAt - startedAt);
+                long threshold = "webview".equals(source) ? 1000L : 1500L;
+                if ("webview".equals(source)) {
+                    if (!mainFrame || !candidate.mainFrame || !"webview".equals(candidate.source)) continue;
+                } else if ("javascript".equals(source)) {
+                    if (candidate.mainFrame != mainFrame || !"webview".equals(candidate.source)) continue;
+                } else if ("resource_timing".equals(source)) {
+                    if (candidate.mainFrame) continue;
+                    if (candidate.timingStartedAt > 0L && candidate.timingStartedAt != startedAt) continue;
+                    if (candidate.timingStartedAt > 0L) threshold = Long.MAX_VALUE;
+                }
+                if (delta <= threshold && delta < bestDelta) { best = candidate; bestDelta = delta; }
+            }
+            if (best == null) {
+                while (networkItems.size() >= MAX_NETWORK_ITEMS) { networkItems.remove(0); networkDropped++; }
+                best = new NetworkEntry();
+                best.id = "n" + nextNetworkId++;
+                best.url = url;
+                best.method = method;
+                best.type = type;
+                best.source = source;
+                best.startedAt = startedAt > 0L ? startedAt : System.currentTimeMillis();
+                best.mainFrame = mainFrame;
+                networkItems.add(best);
+            } else {
+                if ("UNKNOWN".equals(best.method) && !"UNKNOWN".equals(method)) best.method = method;
+                if ((best.type.length() == 0 || "resource".equals(best.type) || "UNKNOWN".equals(best.type)) && type.length() > 0) best.type = type;
+                best.mainFrame = best.mainFrame || mainFrame;
+            }
+            if (headers != null) copySafeHeaders(best.requestHeaders, headers);
+            return best;
+        }
+    }
+
+    private String appendSource(String current, String next) {
+        if (current == null || current.length() == 0) return next;
+        if (current.indexOf(next) >= 0) return current;
+        return current + "+" + next;
+    }
+
+    private void copySafeHeaders(LinkedHashMap<String, String> target, JSONObject source) {
+        if (target == null || source == null) return;
+        java.util.Iterator<String> keys = source.keys();
+        int count = 0;
+        while (keys.hasNext() && count < 50) {
+            String key = keys.next();
+            if (key == null) continue;
+            String lower = key.toLowerCase(Locale.US);
+            if ("cookie".equals(lower) || "set-cookie".equals(lower) || "set-cookie2".equals(lower) || "authorization".equals(lower) || "proxy-authorization".equals(lower)) continue;
+            String value = source.optString(key, "");
+            if (value.length() > 2048) value = value.substring(0, 2048);
+            target.put(key, value);
+            count++;
+        }
+    }
+
+    private void updateNetworkResponse(String url, int status, Map<String, String> headers, String error) {
+        if (url == null || url.length() == 0) return;
+        synchronized (networkLock) {
+            NetworkEntry best = null;
+            for (int i = networkItems.size() - 1; i >= 0; i--) {
+                NetworkEntry e = networkItems.get(i);
+                if (url.equals(e.url) && e.statusCode <= 0 && e.success == null) { best = e; break; }
+            }
+            if (best == null) return;
+            if (status > 0) best.statusCode = status;
+            if (status > 0) best.success = Boolean.valueOf(status >= 200 && status < 400);
+            if (status >= 400 && best.error.length() == 0) best.error = "HTTP " + status;
+            if (error != null && error.length() > 0) { best.error = error; best.success = Boolean.FALSE; }
+            if (best.durationMs < 0L) best.durationMs = Math.max(0L, System.currentTimeMillis() - best.startedAt);
+            if (headers != null) {
+                for (Map.Entry<String, String> h : headers.entrySet()) {
+                    if (h.getKey() == null || h.getValue() == null) continue;
+                    String lower = h.getKey().toLowerCase(Locale.US);
+                    if ("set-cookie".equals(lower) || "set-cookie2".equals(lower) || "authorization".equals(lower) || "cookie".equals(lower)) continue;
+                    best.responseHeaders.put(h.getKey(), h.getValue().length() > 2048 ? h.getValue().substring(0, 2048) : h.getValue());
+                }
+            }
+        }
+    }
+
+    private void clearNetworkItems() {
+        synchronized (networkLock) {
+            networkItems.clear();
+            networkDropped = 0L;
+            networkScriptDropped = 0L;
+        }
     }
 
     private JSONObject listItems(JSONObject args) throws Exception {
@@ -758,6 +1214,25 @@ public final class BrowserManager {
         view.invalidate();
     }
 
+    private static final class NetworkEntry {
+        String id;
+        String url;
+        String method = "UNKNOWN";
+        String type = "resource";
+        String source = "webview";
+        long startedAt;
+        long durationMs = -1L;
+        int statusCode = -1;
+        Boolean success;
+        boolean mainFrame;
+        long sizeBytes = -1L;
+        long timingStartedAt = -1L;
+        String initiator = "";
+        String error = "";
+        final LinkedHashMap<String, String> requestHeaders = new LinkedHashMap<String, String>();
+        final LinkedHashMap<String, String> responseHeaders = new LinkedHashMap<String, String>();
+    }
+
     private static final class ResourceEntry {
         String id;
         String url;
@@ -986,19 +1461,30 @@ public final class BrowserManager {
                         lastPageError = "";
                         pageProgress = 0;
                         clearResourceItems();
-                        if (isHttpUrl(activeUrl)) recordResource(activeUrl, "document", "GET", -1L, null);
+                        clearNetworkItems();
+                        if (isHttpUrl(activeUrl)) {
+                            recordResource(activeUrl, "document", "GET", -1L, null);
+                            findOrCreateNetworkEntry(activeUrl, "UNKNOWN", "document", "webview", System.currentTimeMillis(), true, null);
+                        }
                     }
 
                     @SuppressWarnings("deprecation")
                     public WebResourceResponse shouldInterceptRequest(WebView v, String targetUrl) {
                         recordResource(targetUrl, guessResourceType(targetUrl), "GET", -1L, null);
+                        boolean main = targetUrl != null && targetUrl.equals(activeUrl);
+                        findOrCreateNetworkEntry(targetUrl, "GET", main ? "document" : guessResourceType(targetUrl), "webview", System.currentTimeMillis(), main, null);
                         return null;
                     }
 
                     public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest request) {
                         if (request != null) {
                             Map<String, String> headers = request.getRequestHeaders();
-                            recordResource(request.getUrl().toString(), guessResourceType(request.getUrl().toString()), request.getMethod(), -1L, headers);
+                            String requestUrl = request.getUrl().toString();
+                            String requestType = request.isForMainFrame() ? "document" : guessResourceType(requestUrl);
+                            recordResource(requestUrl, requestType, request.getMethod(), -1L, headers);
+                            JSONObject safeHeaders = new JSONObject();
+                            if (headers != null) { for (Map.Entry<String, String> h : headers.entrySet()) { if (h.getKey() != null && h.getValue() != null) try { safeHeaders.put(h.getKey(), h.getValue()); } catch (Exception ignored) { } } }
+                            findOrCreateNetworkEntry(requestUrl, request.getMethod(), requestType, "webview", System.currentTimeMillis(), request.isForMainFrame(), safeHeaders);
                         }
                         return null;
                     }
@@ -1010,12 +1496,14 @@ public final class BrowserManager {
                             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_LAST_URL, url).apply();
                         }
                         pageProgress = 100;
+                        try { v.evaluateJavascript(networkInstrumentationScript(), null); } catch (Exception ignored) { }
                         CountDownLatch latch = pageLoadLatch;
                         if (latch != null) latch.countDown();
                     }
 
                     @SuppressWarnings("deprecation")
                     public void onReceivedError(WebView v, int errorCode, String description, String failingUrl) {
+                        if (failingUrl != null) updateNetworkResponse(failingUrl, -1, null, "WebView error " + errorCode + ": " + description);
                         if (failingUrl != null && failingUrl.equals(v.getUrl())) {
                             lastPageError = "WebView error " + errorCode + ": " + description;
                         }
@@ -1024,6 +1512,7 @@ public final class BrowserManager {
                     }
 
                     public void onReceivedError(WebView v, WebResourceRequest request, WebResourceError error) {
+                        if (request != null) updateNetworkResponse(request.getUrl().toString(), -1, null, "WebView error " + error.getErrorCode() + ": " + String.valueOf(error.getDescription()));
                         if (request != null && request.isForMainFrame()) {
                             lastPageError = "WebView error " + error.getErrorCode() + ": " + String.valueOf(error.getDescription());
                             CountDownLatch latch = pageLoadLatch;
@@ -1032,6 +1521,7 @@ public final class BrowserManager {
                     }
 
                     public void onReceivedHttpError(WebView v, WebResourceRequest request, WebResourceResponse response) {
+                        if (request != null && response != null) updateNetworkResponse(request.getUrl().toString(), response.getStatusCode(), response.getResponseHeaders(), null);
                         if (request != null && request.isForMainFrame() && response != null && response.getStatusCode() >= 400) {
                             lastPageError = "HTTP " + response.getStatusCode() + " pada halaman utama";
                         }
@@ -1047,6 +1537,22 @@ public final class BrowserManager {
                     }
                 });
                 view.setWebChromeClient(new WebChromeClient() {
+                    public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                        ValueCallback<Uri[]> previous = pendingFileChooser;
+                        if (previous != null) previous.onReceiveValue(null);
+                        pendingFileChooser = callback;
+                        Uri[] files = pendingFileUris;
+                        pendingFileUris = null;
+                        if (files != null && files.length > 0) {
+                            pendingFileChooser = null;
+                            callback.onReceiveValue(files);
+                            return true;
+                        }
+                        pendingFileChooser = null;
+                        callback.onReceiveValue(null);
+                        return true;
+                    }
+
                     public boolean onConsoleMessage(android.webkit.ConsoleMessage message) {
                         addConsoleMessage(message);
                         return true;
@@ -1283,6 +1789,7 @@ public final class BrowserManager {
                     hasLoadedPage = false;
                     activeUrl = "";
                     clearResourceItems();
+                    clearNetworkItems();
                     if (v != null) {
                         try { v.stopLoading(); } catch (Exception ignored) { }
                         try { v.setWebChromeClient(null); } catch (Exception ignored) { }

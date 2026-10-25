@@ -3,6 +3,7 @@ package rh.browser.models;
 import android.app.Activity;
 import android.app.DownloadManager;
 import android.content.Intent;
+import android.content.Context;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.View;
@@ -15,23 +16,19 @@ import org.json.JSONObject;
 
 public class DownloadsActivity extends Activity {
     private LinearLayout list;
+    private int loadRequestId;
 
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         setTitle("Download Manager");
-        // These are regular content screens: do not inherit Browser's immersive flags.
-        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
-        getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
-        getWindow().setStatusBarColor(UiKit.BG);
-        getWindow().setNavigationBarColor(UiKit.BG);
+        UiKit.applyImmersive(this);
         buildUi();
-        load();
     }
 
     private void buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 12), UiKit.dp(this, 16), UiKit.dp(this, 8));
+        root.setPadding(UiKit.dp(this, 10), UiKit.dp(this, 6), UiKit.dp(this, 10), UiKit.dp(this, 5));
         root.setBackgroundColor(UiKit.BG);
         setContentView(root);
         LinearLayout top = UiKit.horizontal(this);
@@ -48,7 +45,8 @@ public class DownloadsActivity extends Activity {
         TextView refresh = UiKit.iconButton(this, 0xf2f1, "Muat ulang");
         top.addView(refresh, UiKit.lp(this, 44, 44));
         refresh.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { load(); } });
-        root.addView(top, UiKit.lp(this, -1, 54));
+        top.setVisibility(View.GONE);
+        root.addView(top, UiKit.lp(this, -1, 0));
 
         LinearLayout system = UiKit.action(this, 0xf019, "Buka unduhan Android", false);
         LinearLayout.LayoutParams sysLp = UiKit.lp(this, -1, 44);
@@ -65,13 +63,54 @@ public class DownloadsActivity extends Activity {
         list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(list, new ScrollView.LayoutParams(-1, -2));
+        UiKit.addBottomNavigation(this, root, "downloads");
     }
 
     private void load() {
         if (list == null) return;
+        final int requestId = ++loadRequestId;
+        if (list.getChildCount() == 0) {
+            LinearLayout loading = UiKit.card(this, 18);
+            loading.addView(UiKit.label(this, "Memuat daftar unduhan...", 13, UiKit.MUTED, false));
+            list.addView(loading, UiKit.lp(this, -1, -2));
+        }
+        final Context appContext = getApplicationContext();
+        Thread worker = new Thread(new Runnable() {
+            public void run() {
+                JSONArray data = null;
+                Exception failure = null;
+                try {
+                    data = BrowserDownloads.list(appContext);
+                } catch (Exception e) {
+                    failure = e;
+                }
+                final JSONArray result = data;
+                final Exception error = failure;
+                runOnUiThread(new Runnable() {
+                    public void run() {
+                        if (isFinishing() || requestId != loadRequestId) return;
+                        renderDownloads(result, error);
+                    }
+                });
+            }
+        }, "rh-download-query");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void renderDownloads(JSONArray a, Exception loadError) {
+        if (list == null) return;
         list.removeAllViews();
+        if (loadError != null) {
+            LinearLayout error = UiKit.card(this, 16);
+            error.addView(UiKit.label(this, "Gagal membaca unduhan", 15, UiKit.RED, true));
+            String message = loadError.getMessage() == null ? loadError.getClass().getSimpleName() : loadError.getMessage();
+            error.addView(UiKit.label(this, message, 12, UiKit.MUTED, false));
+            list.addView(error, UiKit.lp(this, -1, -2));
+            return;
+        }
+        if (a == null) a = new JSONArray();
         try {
-            JSONArray a = BrowserDownloads.list(this);
             if (a.length() == 0) {
                 LinearLayout empty = UiKit.card(this, 20);
                 empty.setGravity(android.view.Gravity.CENTER);
@@ -143,6 +182,16 @@ public class DownloadsActivity extends Activity {
             error.addView(UiKit.label(this, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(), 12, UiKit.MUTED, false));
             list.addView(error, UiKit.lp(this, -1, -2));
         }
+    }
+
+    protected void onResume() {
+        super.onResume();
+        load();
+    }
+
+    protected void onDestroy() {
+        loadRequestId++;
+        super.onDestroy();
     }
 
     private void openDownload(long id) {

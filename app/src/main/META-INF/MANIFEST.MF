@@ -1,0 +1,94 @@
+Manifest-Version: 1.0
+Built-By: Signflinger
+Created-By: Android Gradle 8.0.2
+
+Name: AndroidManifest.xml
+SHA1-Digest: 21nKsA+6dC+IJixV357ihH93++c=
+
+Name: assets/fonts/FONT_AWESOME_LICENSE.txt
+SHA1-Digest: +gAiSKk7ITMteOHms7SpmSqOi9s=
+
+Name: assets/fonts/fa-brands-400.ttf
+SHA1-Digest: 2m9TfNWXt20mSXDxyV5L7ryC/ek=
+
+Name: assets/fonts/fa-regular-400.ttf
+SHA1-Digest: bn8GUQWe6peD6osoiSssl5wvfzA=
+
+Name: assets/fonts/fa-solid-900.ttf
+SHA1-Digest: eAqP8W67aB+F1dMPrJTr6EWhK14=
+
+Name: java/rh/browser/models/BootReceiver.java
+SHA1-Digest: VFo7UVfqbEa0z53cJCKHVdxwhuM=
+
+Name: java/rh/browser/models/BrowserDownloads.java
+SHA1-Digest: 9e95Y9E58Giv8wuplgWTMmSfRv0=
+
+Name: java/rh/browser/models/BrowserManager.java
+SHA1-Digest: pEyp21en3XgGPW1xYHOei9aAiLI=
+
+Name: java/rh/browser/models/BrowserService.java
+SHA1-Digest: JNUICFfpu36njOBBSO4P9n0ReyM=
+
+Name: java/rh/browser/models/DownloadsActivity.java
+SHA1-Digest: eeRpCvm/hBM60EZL27DWXCIA/Ck=
+
+Name: java/rh/browser/models/MainActivity.java
+SHA1-Digest: ThhqOtjLVOdAnqmYIbT4Mob0A2g=
+
+Name: java/rh/browser/models/McpFileProvider.java
+SHA1-Digest: TjiT5/xWE/pHLpgLRH/8Cxgv5yg=
+
+Name: java/rh/browser/models/McpServer.java
+SHA1-Digest: mZ734o8Rv5nfQs5Jex71U5uu2wI=
+
+Name: java/rh/browser/models/ServiceRecoveryReceiver.java
+SHA1-Digest: RKZpPN8sZJU628fr3atnkFCc0G4=
+
+Name: java/rh/browser/models/ServiceSettingsActivity.java
+SHA1-Digest: cJ7ixcW+lmMoyI0lny05ojyLJuk=
+
+Name: java/rh/browser/models/ToolDef.java
+SHA1-Digest: pJH6iabUUXCsc6tKb15igGlicvk=
+
+Name: java/rh/browser/models/ToolRegistry.java
+SHA1-Digest: Ir7VgPVtymd8BXNABcFcpR0JvaM=
+
+Name: java/rh/browser/models/ToolSettings.java
+SHA1-Digest: hS2zb34igm8kFowzpv6OvPes1BE=
+
+Name: java/rh/browser/models/ToolSettingsActivity.java
+SHA1-Digest: WSRFNtzJb4wP6oSpOmuq5/glFSA=
+
+Name: java/rh/browser/models/UiKit.java
+SHA1-Digest: UUQkx7DZRR9nEo9Ii4xy/U1Xiwo=
+
+Name: jniLibs/arm64-v8a/libcloudflared.so
+SHA1-Digest: /1VDU0WDSj/iJJNndsKqFfbtU1g=
+
+Name: res/drawable-hdpi/ic_launcher.png
+SHA1-Digest: dtlznTqY29ZK0LzjWDDr4+901y8=
+
+Name: res/drawable-mdpi/ic_launcher.png
+SHA1-Digest: dtlznTqY29ZK0LzjWDDr4+901y8=
+
+Name: res/drawable-xhdpi/ic_launcher.png
+SHA1-Digest: dtlznTqY29ZK0LzjWDDr4+901y8=
+
+Name: res/drawable-xxhdpi/ic_launcher.png
+SHA1-Digest: dtlznTqY29ZK0LzjWDDr4+901y8=
+
+Name: res/drawable/ic_launcher.png
+SHA1-Digest: dtlznTqY29ZK0LzjWDDr4+901y8=
+
+Name: res/layout/main.xml
+SHA1-Digest: mdcbUSc9JROSRE5X3EVEb7cuIG0=
+
+Name: res/values-v21/styles.xml
+SHA1-Digest: AkAopI35MtJY7ld6lo13gpLOUWo=
+
+Name: res/values/strings.xml
+SHA1-Digest: RBTTm5diRm+SbJXC73kGZxmaT/4=
+
+Name: res/values/styles.xml
+SHA1-Digest: PwXOQ90CaFk1BmXyrfq4m1asfck=
+
